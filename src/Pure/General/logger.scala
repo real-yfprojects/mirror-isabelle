@@ -45,6 +45,11 @@ class Logger {
   ): A = Timing.timeit(body, message = message, enabled = enabled, output = apply(_))
 }
 
+class Console_Logger(override val guard_time: Time = Time.min) extends Logger {
+  override def output(msg: => String): Unit = Output.error_message(msg)
+  override def toString: String = "Console.err"
+}
+
 class File_Logger(path: Path, override val guard_time: Time = Time.min)
 extends Logger {
   override def output(msg: => String): Unit = synchronized { File.append(path, msg + "\n") }
