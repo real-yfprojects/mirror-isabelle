@@ -38,16 +38,25 @@ object Language_Server {
         include_sessions = include_sessions, session_ancestor = session_ancestor,
         session_requirements = session_requirements).check_errors
 
+    /* The session to build is the background's own, not the name that was asked for:
+       with session_requirements (option -R) Sessions.background returns a synthetic
+       "NAME_requirements(ANCESTOR)" session holding the theories NAME imports from other
+       sessions, and that is also what session_heaps then loads. Building the named
+       session instead builds the wrong thing and leaves the required heap missing, so
+       -R started with "Missing heap image for session ..." and nothing was cached.
+       Session.build, which Isabelle/jEdit uses for the same purpose, selects the
+       background's session name. */
     def build(no_build: Boolean = false, progress: Progress = new Progress): Build.Results =
       Build.build(options,
-        selection = Sessions.Selection.session(logic),
+        selection = Sessions.Selection.session(session_background.session_name),
         build_heap = true, no_build = no_build, dirs = session_dirs,
         infos = session_background.infos,
         progress = progress)
 
     if (!session_no_build && !build(no_build = true).ok) {
-      build_started(logic)
-      if (!build(progress = build_progress).ok) build_failed(logic)
+      // Report the session actually being built, which under -R is the requirements image.
+      build_started(session_background.session_name)
+      if (!build(progress = build_progress).ok) build_failed(session_background.session_name)
     }
 
     session_background
