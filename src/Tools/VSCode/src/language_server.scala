@@ -364,8 +364,16 @@ class Language_Server(
     val try_session =
       try {
         val progress = channel.progress(verbose = true)
+        /* Feed the build itself, not just the started/failed one-liners: build_progress
+           defaults to the base Progress, whose output is a no-op, so the heap build ran
+           entirely silent. It happens inside "initialize", which does not reply until it
+           finishes, so a cold build was tens of minutes with nothing after "Build started
+           for ..." -- indistinguishable from a hang. This progress is Progress.Status, so
+           it also carries the long-running-command lines that tell a slow proof from a
+           stuck one. */
         val session_background =
           Language_Server.build_session(options, session_name,
+            build_progress = progress,
             session_dirs = session_dirs,
             include_sessions = include_sessions,
             session_ancestor = session_ancestor,
