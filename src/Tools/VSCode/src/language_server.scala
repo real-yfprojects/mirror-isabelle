@@ -232,8 +232,20 @@ class Language_Server(
       val (invoke_input, invoke_load) =
         resources.resolve_dependencies(session, editor, file_watcher)
       if (invoke_input) editor.invoke()
+      loading_.change(_ => invoke_load)
       if (invoke_load) delay_load.invoke()
     }
+
+  /* Dependency resolution is asynchronous: an opened theory whose imports are not
+     loaded yet has a failing header, which is a transient state rather than an error
+     about the proof. Clients need to be able to tell the two apart. */
+  private val loading_ = Synchronized(false)
+  def loading: Boolean = loading_.value
+
+  private def start_loading(): Unit = {
+    loading_.change(_ => true)
+    delay_load.invoke()
+  }
 
   private def close_document(file: JFile): Unit = {
     if (resources.close_model(file)) {
@@ -364,7 +376,7 @@ class Language_Server(
         val session_options = options.bool.update("editor_output_state", true)
         val session =
           new VSCode_Session(session_options, session_resources) {
-            override def deps_changed(): Unit = delay_load.invoke()
+            override def deps_changed(): Unit = start_loading()
           }
 
         Some((session_background, session))
@@ -582,7 +594,7 @@ class Language_Server(
           case LSP.Exit() => exit()
           case LSP.DidOpenTextDocument(file, _, version, text) =>
             change_document(file, version, List(LSP.TextDocumentChange(None, text)))
-            delay_load.invoke()
+            start_loading()
           case LSP.DidChangeTextDocument(file, version, changes) =>
             change_document(file, version, changes)
           case LSP.DidCloseTextDocument(file) => close_document(file)

@@ -23,7 +23,10 @@ object VSCode_Theories {
       "theory" -> theory,
       "overall" -> overall.toString,
       "cumulated_time" -> status.cumulated_time.seconds,
-      "max_time" -> status.max_time.seconds) ++ status.json
+      "max_time" -> status.max_time.seconds,
+      // Node_Status.json omits this, and it is what separates "the header has not gone
+      // through yet" from "a proof failed".
+      "initialized" -> status.initialized) ++ status.json
 
   def json_command(id: Document_ID.Command, name: String, time: Time): JSON.Object.T =
     JSON.Object("id" -> id, "name" -> name, "time" -> time.seconds)
@@ -99,6 +102,7 @@ class VSCode_Theories(server: Language_Server) {
     server.channel.write(
       LSP.Theories_Response(
         phase = server.session.phase.print,
+        loading = server.loading,
         threshold = limit.seconds,
         current = current.map(name => Url.print_file_name(name.node)),
         nodes = nodes,

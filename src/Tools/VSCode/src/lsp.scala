@@ -842,6 +842,7 @@ object LSP {
   object Theories_Response {
     def apply(
       phase: String,
+      loading: Boolean,
       threshold: Double,
       current: Option[String],
       nodes: List[JSON.Object.T],
@@ -850,6 +851,7 @@ object LSP {
       Notification("PIDE/theories_response",
         JSON.Object(
           "phase" -> phase,
+          "loading" -> loading,
           "threshold" -> threshold,
           "nodes" -> nodes,
           "commands" -> commands) ++
