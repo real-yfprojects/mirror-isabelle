@@ -211,6 +211,7 @@ class Language_Server(
   def resources: VSCode_Resources = session.resources
 
   private val sledgehammer = new VSCode_Sledgehammer(server)
+  private val theories = new VSCode_Theories(server)
 
   def rendering_offset(node_pos: Line.Node_Position): Option[(VSCode_Rendering, Text.Offset)] =
     for {
@@ -382,6 +383,7 @@ class Language_Server(
 
       dynamic_output.init()
       sledgehammer.init()
+      theories.init()
 
       try {
         Isabelle_Process.start(
@@ -411,6 +413,7 @@ class Language_Server(
         delay_caret_update.revoke()
         delay_preview.revoke()
         sledgehammer.exit()
+        theories.exit()
 
         val result = session.stop()
         if (result.ok) reply("")
@@ -609,6 +612,8 @@ class Language_Server(
           case LSP.Preview_Request(file, column) => preview_request(file, column)
           case LSP.Abbrevs_Request() => abbrevs_request()
           case LSP.Documentation_Request() => documentation_request()
+          case LSP.Theories_Request() => theories.request()
+          case LSP.Theories_Set_Threshold(threshold) => theories.set_threshold(threshold)
           case LSP.Sledgehammer_Provers_Request() => sledgehammer.provers()
           case LSP.Sledgehammer_Request(args) => sledgehammer.request(args)
           case LSP.Sledgehammer_Cancel() => sledgehammer.cancel()

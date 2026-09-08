@@ -824,4 +824,35 @@ object LSP {
           "character" -> node_pos.pos.column,
           "text" -> text))
   }
+
+
+  /* theories: status and timing */
+
+  object Theories_Request extends Notification0("PIDE/theories_request")
+
+  object Theories_Set_Threshold {
+    def unapply(json: JSON.T): Option[Double] =
+      json match {
+        case Notification("PIDE/theories_set_threshold", Some(params)) =>
+          JSON.double(params, "threshold")
+        case _ => None
+      }
+  }
+
+  object Theories_Response {
+    def apply(
+      phase: String,
+      threshold: Double,
+      current: Option[String],
+      nodes: List[JSON.Object.T],
+      commands: List[JSON.Object.T]
+    ): JSON.T =
+      Notification("PIDE/theories_response",
+        JSON.Object(
+          "phase" -> phase,
+          "threshold" -> threshold,
+          "nodes" -> nodes,
+          "commands" -> commands) ++
+        JSON.optional("current" -> current))
+  }
 }
