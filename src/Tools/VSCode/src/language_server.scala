@@ -221,6 +221,7 @@ class Language_Server(
 
   private val sledgehammer = new VSCode_Sledgehammer(server)
   private val theories = new VSCode_Theories(server)
+  private val simplifier_trace = new VSCode_Simplifier_Trace(server)
 
   def rendering_offset(node_pos: Line.Node_Position): Option[(VSCode_Rendering, Text.Offset)] =
     for {
@@ -413,6 +414,7 @@ class Language_Server(
       dynamic_output.init()
       sledgehammer.init()
       theories.init()
+      simplifier_trace.init()
 
       try {
         Isabelle_Process.start(
@@ -443,6 +445,7 @@ class Language_Server(
         delay_preview.revoke()
         sledgehammer.exit()
         theories.exit()
+        simplifier_trace.exit()
 
         val result = session.stop()
         if (result.ok) reply("")
@@ -642,6 +645,13 @@ class Language_Server(
           case LSP.Abbrevs_Request() => abbrevs_request()
           case LSP.Documentation_Request() => documentation_request()
           case LSP.Theories_Request() => theories.request()
+          case LSP.Simplifier_Trace_Request() => simplifier_trace.request()
+          case LSP.Simplifier_Trace_Reply(serial, answer) =>
+            simplifier_trace.reply(serial, answer)
+          case LSP.Simplifier_Trace_Auto_Update(enabled) =>
+            simplifier_trace.set_auto_update(enabled)
+          case LSP.Simplifier_Trace_Clear_Memory() => simplifier_trace.clear_memory()
+          case LSP.Simplifier_Trace_Show() => simplifier_trace.show_trace()
           case LSP.Theories_Set_Threshold(threshold) => theories.set_threshold(threshold)
           case LSP.Sledgehammer_Provers_Request() => sledgehammer.provers()
           case LSP.Sledgehammer_Request(args) => sledgehammer.request(args)

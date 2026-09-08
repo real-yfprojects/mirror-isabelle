@@ -826,6 +826,52 @@ object LSP {
   }
 
 
+  /* simplifier trace */
+
+  object Simplifier_Trace_Request extends Notification0("PIDE/simplifier_trace_request")
+  object Simplifier_Trace_Clear_Memory extends Notification0("PIDE/simplifier_trace_clear_memory")
+  object Simplifier_Trace_Show extends Notification0("PIDE/simplifier_trace_show")
+
+  object Simplifier_Trace_Auto_Update {
+    def unapply(json: JSON.T): Option[Boolean] =
+      json match {
+        case Notification("PIDE/simplifier_trace_auto_update", Some(params)) =>
+          JSON.bool(params, "enabled")
+        case _ => None
+      }
+  }
+
+  object Simplifier_Trace_Reply {
+    def unapply(json: JSON.T): Option[(Long, String)] =
+      json match {
+        case Notification("PIDE/simplifier_trace_reply", Some(params)) =>
+          for {
+            serial <- JSON.long(params, "serial")
+            answer <- JSON.string(params, "answer")
+          } yield (serial, answer)
+        case _ => None
+      }
+  }
+
+  object Simplifier_Trace_Response {
+    def apply(
+      auto_update: Boolean,
+      pending: Int,
+      question: Option[JSON.Object.T]
+    ): JSON.T =
+      Notification("PIDE/simplifier_trace_response",
+        JSON.Object(
+          "auto_update" -> auto_update,
+          "pending" -> pending) ++
+        JSON.optional("question" -> question))
+  }
+
+  object Simplifier_Trace_Full {
+    def apply(entries: List[JSON.Object.T]): JSON.T =
+      Notification("PIDE/simplifier_trace_full", JSON.Object("entries" -> entries))
+  }
+
+
   /* theories: status and timing */
 
   object Theories_Request extends Notification0("PIDE/theories_request")
