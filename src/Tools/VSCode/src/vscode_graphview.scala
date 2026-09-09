@@ -60,14 +60,17 @@ class VSCode_Graphview(server: Language_Server) {
       LSP.Graphview_Response(graph.map(VSCode_Graphview.json_graph), error))
 
   private def update(): Unit = {
+    /* No is_outdated guard: see the note in vscode_simplifier_trace.scala. The server's
+       snapshot carries pending edits from every open model, so requiring stability here
+       means never finding anything. */
     val results =
       server.editor.current_node_snapshot(()) match {
-        case Some(snapshot) if !snapshot.is_outdated =>
+        case Some(snapshot) =>
           server.editor.current_command((), snapshot) match {
             case Some(command) => snapshot.command_results(command)
             case None => Command.Results.empty
           }
-        case _ => Command.Results.empty
+        case None => Command.Results.empty
       }
 
     VSCode_Graphview.find_graphs(results).lastOption match {

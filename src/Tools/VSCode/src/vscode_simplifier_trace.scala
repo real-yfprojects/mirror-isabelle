@@ -41,16 +41,22 @@ class VSCode_Simplifier_Trace(server: Language_Server) {
 
   /* update */
 
+  /* Deliberately no `!snapshot.is_outdated` guard, though Simplifier_Trace_Dockable has
+     one. It does not transfer: VSCode_Resources.snapshot builds pending_edits from *every*
+     open model, and is_outdated is just !pending_edits.is_stable, so with more than one
+     document open the snapshot is outdated almost always and the guard yields empty
+     results forever. Dynamic_Output, which works, takes the caret's snapshot unguarded;
+     this follows it. */
   private def update(follow: Boolean = true): Unit = {
     val (id, results) =
       if (follow) {
         server.editor.current_node_snapshot(()) match {
-          case Some(snapshot) if !snapshot.is_outdated =>
+          case Some(snapshot) =>
             server.editor.current_command((), snapshot) match {
               case Some(command) => (command.id, snapshot.command_results(command))
               case None => (Document_ID.none, Command.Results.empty)
             }
-          case _ => current.value
+          case None => current.value
         }
       }
       else current.value
