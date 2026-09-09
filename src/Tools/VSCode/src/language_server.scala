@@ -431,10 +431,12 @@ class Language_Server(
     }
   }
 
-  def shutdown(id: LSP.Id): Unit = {
-    def reply(err: String): Unit = channel.write(LSP.Shutdown.reply(id, err))
+  /* Stop the prover, whoever asked.
 
-    session_.change({
+     Factored out of "shutdown" so that end of input can reuse it: the two differ only in
+     whether there is still a client to answer. */
+  private def stop_session(): String =
+    session_.change_result({
       case Some(session) =>
         session.commands_changed -= prover_output
         session.syslog_messages -= syslog_messages
@@ -454,14 +456,12 @@ class Language_Server(
         query.exit()
 
         val result = session.stop()
-        if (result.ok) reply("")
-        else reply("Prover shutdown failed: " + result.rc)
-        None
-      case None =>
-        reply("Prover inactive")
-        None
+        ((if (result.ok) "" else "Prover shutdown failed: " + result.rc), None)
+      case None => ("Prover inactive", None)
     })
-  }
+
+  def shutdown(id: LSP.Id): Unit =
+    channel.write(LSP.Shutdown.reply(id, stop_session()))
 
   def exit(): Unit = {
     channel.log_file("\n")
@@ -684,7 +684,19 @@ class Language_Server(
             case _ => handle(json)
           }
           loop()
-        case None => channel.log_file.warning("TERMINATE")
+        /* End of input: the client is gone without having said "shutdown"/"exit", which
+           is what happens whenever an editor dies rather than closes -- a killed process,
+           a crashed extension host, a terminated terminal.
+
+           Merely returning here leaves the session running, and with it the prover and
+           this JVM: nothing else holds a reference to the client, so nothing else will
+           ever notice. Editors that spawn the server therefore accumulated a full prover
+           stack per abandoned run, and there is nobody left to be told about it. So treat
+           EOF as the shutdown the client did not get to send. */
+        case None =>
+          channel.log_file.warning("TERMINATE")
+          stop_session()
+          exit()
       }
     }
     loop()
