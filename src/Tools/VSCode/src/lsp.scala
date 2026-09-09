@@ -769,6 +769,52 @@ object LSP {
   }
 
 
+  /* query operations */
+
+  object Query_Operations_Request extends Notification0("PIDE/query_operations_request")
+
+  object Query_Operations_Response {
+    def apply(operations: List[String]): JSON.T =
+      Notification("PIDE/query_operations_response", JSON.Object("operations" -> operations))
+  }
+
+  object Query_Request {
+    def unapply(json: JSON.T): Option[(String, List[String])] =
+      json match {
+        case Notification("PIDE/query_request", Some(params)) =>
+          for {
+            operation <- JSON.string(params, "operation")
+            args <- JSON.strings(params, "args")
+          } yield (operation, args)
+        case _ => None
+      }
+  }
+
+  class Query_Operation_Notification(name: String) {
+    def unapply(json: JSON.T): Option[String] =
+      json match {
+        case Notification(method, Some(params)) if method == name =>
+          JSON.string(params, "operation")
+        case _ => None
+      }
+  }
+
+  object Query_Cancel extends Query_Operation_Notification("PIDE/query_cancel")
+  object Query_Locate extends Query_Operation_Notification("PIDE/query_locate")
+
+  object Query_Status {
+    def apply(operation: String, message: String): JSON.T =
+      Notification("PIDE/query_status",
+        JSON.Object("operation" -> operation, "message" -> message))
+  }
+
+  object Query_Output {
+    def apply(operation: String, content: String): JSON.T =
+      Notification("PIDE/query_output",
+        JSON.Object("operation" -> operation, "content" -> content))
+  }
+
+
   /* sledgehammer */
 
   object Sledgehammer_Provers_Request
