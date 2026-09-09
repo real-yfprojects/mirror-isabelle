@@ -222,6 +222,7 @@ class Language_Server(
   private val sledgehammer = new VSCode_Sledgehammer(server)
   private val theories = new VSCode_Theories(server)
   private val simplifier_trace = new VSCode_Simplifier_Trace(server)
+  private val graphview = new VSCode_Graphview(server)
 
   def rendering_offset(node_pos: Line.Node_Position): Option[(VSCode_Rendering, Text.Offset)] =
     for {
@@ -415,6 +416,7 @@ class Language_Server(
       sledgehammer.init()
       theories.init()
       simplifier_trace.init()
+      graphview.init()
 
       try {
         Isabelle_Process.start(
@@ -446,6 +448,7 @@ class Language_Server(
         sledgehammer.exit()
         theories.exit()
         simplifier_trace.exit()
+        graphview.exit()
 
         val result = session.stop()
         if (result.ok) reply("")
@@ -645,6 +648,7 @@ class Language_Server(
           case LSP.Abbrevs_Request() => abbrevs_request()
           case LSP.Documentation_Request() => documentation_request()
           case LSP.Theories_Request() => theories.request()
+          case LSP.Graphview_Request() => graphview.request()
           case LSP.Simplifier_Trace_Request() => simplifier_trace.request()
           case LSP.Simplifier_Trace_Reply(serial, answer) =>
             simplifier_trace.reply(serial, answer)

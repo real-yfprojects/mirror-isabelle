@@ -826,6 +826,17 @@ object LSP {
   }
 
 
+  /* graphview */
+
+  object Graphview_Request extends Notification0("PIDE/graphview_request")
+
+  object Graphview_Response {
+    def apply(graph: Option[JSON.Object.T], error: Option[String]): JSON.T =
+      Notification("PIDE/graphview_response",
+        JSON.Object() ++ JSON.optional("graph" -> graph) ++ JSON.optional("error" -> error))
+  }
+
+
   /* simplifier trace */
 
   object Simplifier_Trace_Request extends Notification0("PIDE/simplifier_trace_request")
