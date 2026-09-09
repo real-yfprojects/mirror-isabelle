@@ -164,14 +164,21 @@ object Thy_Syntax {
         val node_commands =
           if (node.is_empty) Linear_Set.empty
           else {
-            val thy_changed = if (node_source == command.source) Nil else List(node_name.node)
+            /* Session sources are stored as raw file bytes, but editor content is
+               Line.normalize'd, so a CRLF file differs from its own build for no
+               reason. A CRLF pair is a single symbol, so markup offsets agree. */
+            def same_source(a: String, b: String): Boolean =
+              a == b || Line.normalize(a) == Line.normalize(b)
+
+            val thy_changed =
+              if (same_source(node_source, command.source)) Nil else List(node_name.node)
             val blobs_changed =
               List.from(
                 for {
                   blob_name <- command.blobs_names.iterator
                   blob_node = snapshot.version.nodes(blob_name)
                   doc_blob <- doc_blobs.get(blob_name)
-                  if blob_node.source != doc_blob.source
+                  if !same_source(blob_node.source, doc_blob.source)
                 } yield blob_name.node)
 
             val changed = thy_changed ::: blobs_changed
