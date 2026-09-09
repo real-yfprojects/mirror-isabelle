@@ -39,8 +39,21 @@ object VSCode_Graphview {
       graph <- find_graph_bodies(List(elem))
     } yield graph).toList
 
+  /* Graph_Display.display_graph emits the graph through YXML.output_markup_elem, which
+     builds an XML.wrap_elem rather than a plain element. A Wrapped_Elem is physically
+
+       XML.Elem(Markup("xml_elem", ("xml_name", "graphview") :: props),
+         XML.Elem(Markup("xml_body", Nil), <encoded graph>) :: <visible text>)
+
+     so the element's own name is "xml_elem", never "graphview", and the graph is its
+     *first* body. Matching on the markup name alone walks straight past it -- which is
+     what made this publish an empty graph while the Output panel plainly showed the
+     command's "See graph". The plain-Elem case is kept in case a producer ever emits one
+     unwrapped. */
   private def find_graph_bodies(trees: List[XML.Tree]): List[XML.Body] =
     trees.flatMap {
+      case XML.Wrapped_Elem(Markup(Markup.GRAPHVIEW, _), body, _) => List(body)
+      case XML.Wrapped_Elem(_, body1, body2) => find_graph_bodies(body1 ::: body2)
       case XML.Elem(Markup(Markup.GRAPHVIEW, _), body) => List(body)
       case XML.Elem(_, body) => find_graph_bodies(body)
       case _ => Nil
