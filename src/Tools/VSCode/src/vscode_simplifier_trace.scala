@@ -31,9 +31,13 @@ class VSCode_Simplifier_Trace(server: Language_Server) {
      meaningful against the question set of one command, so both are remembered. */
   private val current = Synchronized((Document_ID.none, Command.Results.empty))
 
+  /* Publish on both edges, and from the dispatcher like every other entry point here.
+     The response is what carries auto_update, so refreshing only when enabling leaves the
+     panel showing the old value after the user turns it off -- the one case where the
+     client cannot infer the state for itself. */
   def set_auto_update(enabled: Boolean): Unit = {
     do_update.change(_ => enabled)
-    if (enabled) update()
+    server.editor.send_dispatcher { update() }
   }
 
   private def answers_json(question: Simplifier_Trace.Question): List[JSON.Object.T] =
