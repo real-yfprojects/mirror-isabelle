@@ -149,10 +149,13 @@ object Line {
             Position(line = lines_count)
           case line :: ls =>
             val n = line.text.length
-            if (ls.isEmpty || i <= n) {
-              Position(line = lines_count).advance(line.text.drop(n - i))
+            if (i <= n) Position(line = lines_count).advance(line.text.drop(n - i))
+            else {
+              require(ls.nonEmpty,
+                "bad Line.position.move: text offset " + text_offset +
+                  " beyond text length " + text_length)
+              move(i - (n + 1), lines_count + 1, ls)
             }
-            else move(i - (n + 1), lines_count + 1, ls)
         }
       }
       move(text_offset, 0, lines)
