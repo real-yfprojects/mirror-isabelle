@@ -144,7 +144,15 @@ class VSCode_Simplifier_Trace(server: Language_Server) {
     server.editor.send_dispatcher { update() }
   }
 
-  /** The full trace of the current command, rather than the pending question. */
+  /** The full trace of the current command, rather than the pending question.
+
+      Sent flat, with what the client needs to rebuild the tree Simplifier_Trace_Window
+      draws: the parent each item was emitted under, its kind (invocation, step, log,
+      hint, ignore) and, for hints, whether the step succeeded. Without those three the
+      trace is a list in emission order, which says what the simplifier looked at but not
+      what it did or why -- a side-condition attempt is indistinguishable from a rewrite
+      of the goal. `plain` is the one-line text of the same content, for summaries and
+      search; XML.content skips the hidden typing bodies just as make_html does. */
   def show_trace(): Unit =
     server.editor.send_dispatcher {
       val (_, results) = current.value
@@ -153,8 +161,12 @@ class VSCode_Simplifier_Trace(server: Language_Server) {
         trace.entries.map(data =>
           JSON.Object(
             "serial" -> data.serial,
+            "parent" -> data.parent,
+            "kind" -> data.markup.stripPrefix("simp_trace_"),
             "text" -> data.text,
-            "content" -> html_content(data.content)))
+            "content" -> html_content(data.content),
+            "plain" -> server.resources.output_text(XML.content(data.content))) ++
+          JSON.optional("success" -> Simplifier_Trace.Success.unapply(data.props)))
       server.channel.write(LSP.Simplifier_Trace_Full(entries))
     }
 
