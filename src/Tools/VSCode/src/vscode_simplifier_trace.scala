@@ -43,6 +43,40 @@ class VSCode_Simplifier_Trace(server: Language_Server) {
   private def answers_json(question: Simplifier_Trace.Question): List[JSON.Object.T] =
     question.answers.map(a => JSON.Object("name" -> a.name, "label" -> a.string))
 
+
+  /* rendering */
+
+  /* As the State panel renders its output, and for the same three reasons.
+     Simplifier_Trace.ML hands over `content` as a *list* of blocks -- "Instance of ...",
+     "Trying to rewrite: ...", the matching terms -- so Pretty.separate is what puts
+     anything at all between them; Pretty.formatted is what turns the blocks' breaks into
+     real line ends and indentation at the panel's width; and make_html is what filters
+     the body down to the markup meant to be seen. That last one is not cosmetic: a term
+     from Syntax.pretty_term carries its typing as nested markup, which a client that
+     simply displays every element renders inline, so "?f" arrives with its own type
+     spliced into the middle of the term.
+
+     This used to be XML.string_of_body(Pretty.unbreakable(...)), which does none of the
+     three: one line, no separation, every zero-width break dropped outright (spaces(0) is
+     Nil), and every invisible markup element served as text. */
+  private def html_content(content: XML.Body): String = {
+    val formatted =
+      Pretty.formatted(Pretty.separate(content),
+        margin = server.resources.message_margin, metric = Symbol.Metric)
+    val node_context =
+      new Browser_Info.Node_Context {
+        override def make_ref(props: Properties.T, body: XML.Body): Option[XML.Elem] =
+          for {
+            thy_file <- Position.Def_File.unapply(props)
+            def_line <- Position.Def_Line.unapply(props)
+            platform_path <- server.session.store.source_file(thy_file)
+            uri = File.uri(Path.explode(File.standard_path(platform_path)).absolute_file)
+          } yield HTML.link(uri.toString + "#" + def_line, body)
+      }
+    val elements = Browser_Info.extra_elements.copy(entity = Markup.Elements.full)
+    HTML.source(node_context.make_html(elements, formatted)).toString
+  }
+
   /* update */
 
   /* Deliberately no `!snapshot.is_outdated` guard, though Simplifier_Trace_Dockable has
@@ -78,7 +112,7 @@ class VSCode_Simplifier_Trace(server: Language_Server) {
         JSON.Object(
           "serial" -> q.data.serial,
           "text" -> q.data.text,
-          "content" -> XML.string_of_body(Pretty.unbreakable(q.data.content)),
+          "content" -> html_content(q.data.content),
           "answers" -> answers_json(q))
       }
 
@@ -120,7 +154,7 @@ class VSCode_Simplifier_Trace(server: Language_Server) {
           JSON.Object(
             "serial" -> data.serial,
             "text" -> data.text,
-            "content" -> XML.string_of_body(Pretty.unbreakable(data.content))))
+            "content" -> html_content(data.content)))
       server.channel.write(LSP.Simplifier_Trace_Full(entries))
     }
 
