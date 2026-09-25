@@ -76,6 +76,9 @@ extends Resources(session_background, log = log_file) {
 
   private val state = Synchronized(VSCode_Resources.State())
 
+  val completion_cache: Synchronized[Option[VSCode_Rendering.Semantic_Cache]] =
+    Synchronized(None)
+
 
   /* options */
 

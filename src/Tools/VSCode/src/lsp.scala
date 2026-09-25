@@ -158,11 +158,13 @@ object LSP {
     val json: JSON.T =
       JSON.Object(
         "textDocumentSync" -> 2,
+        /*no word characters: within a word, VS Code filters the list it has;
+          "." separates words in VS Code but not in long names*/
         "completionProvider" -> JSON.Object(
           "resolveProvider" -> false,
           "triggerCharacters" ->
-            (Symbol.symbols.entries.flatMap(_.abbrevs).flatMap(_.toList).map(_.toString)
-            ++ Symbol.symbols.entries.map(_.name).flatMap(_.toList).map(_.toString)).distinct
+            ("\\" :: "." :: Symbol.symbols.entries.flatMap(_.abbrevs).flatMap(_.toList)
+              .filterNot(Symbol.is_ascii_letdig).map(_.toString)).distinct
         ),
         "hoverProvider" -> true,
         "definitionProvider" -> true,
@@ -389,8 +391,10 @@ object LSP {
     detail: Option[String] = None,
     documentation: Option[String] = None,
     filter_text: Option[String] = None,
+    sort_text: Option[String] = None,
     commit_characters: Option[List[String]] = None,
     text: Option[String] = None,
+    snippet: Boolean = false,
     range: Option[Line.Range] = None,
     command: Option[Command] = None
   ) {
@@ -400,14 +404,17 @@ object LSP {
       JSON.optional("detail" -> detail) ++
       JSON.optional("documentation" -> documentation) ++
       JSON.optional("filterText" -> filter_text) ++
+      JSON.optional("sortText" -> sort_text) ++
+      (if (snippet) JSON.Object("insertTextFormat" -> 2) else JSON.Object.empty) ++
       JSON.optional("textEdit" -> range.map(TextEdit(_, text.getOrElse(label)).json)) ++
       JSON.optional("commitCharacters" -> commit_characters) ++
       JSON.optional("command" -> command.map(_.json))
   }
 
   object Completion extends RequestTextDocumentPosition("textDocument/completion") {
-    def reply(id: Id, result: List[CompletionItem]): JSON.T =
-      ResponseMessage(id, Some(result.map(_.json)))
+    def reply(id: Id, result: List[CompletionItem], incomplete: Boolean = false): JSON.T =
+      ResponseMessage(id,
+        Some(JSON.Object("isIncomplete" -> incomplete, "items" -> result.map(_.json))))
   }
 
 
