@@ -12,6 +12,12 @@ option vscode_output_delay : real = 0.5 for vscode
 option vscode_load_delay : real = 0.5 for vscode
   -- "delay for file load operations"
 
+option vscode_completion_delay : real = 0.5 for vscode
+  -- "maximum delay for completion to wait for the prover (semantic completion)"
+
+option vscode_completion_limit : int = 1000 for vscode
+  -- "limit for completion within the formal context (overrides completion_limit)"
+
 option vscode_tooltip_margin : int = 60 for vscode
   -- "margin for pretty-printing of tooltips"
 
