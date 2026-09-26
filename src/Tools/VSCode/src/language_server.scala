@@ -187,9 +187,22 @@ class Language_Server(
   private val graphview = new VSCode_Graphview(server)
   private val query = new VSCode_Query(server)
 
+  /* The completion options are declared in etc/options, which this code may run without:
+     isabelle-vscode's extended server compiles it into a jar that goes ahead of a released
+     distribution's own classes, and a jar carries no option declarations. An undeclared
+     option cannot be read ("Unknown option"), and at session start that would fail the
+     whole server, so fall back to the defaults declared in etc/options. */
+  private def completion_limit: Int =
+    if (options.defined("vscode_completion_limit")) options.int("vscode_completion_limit")
+    else 1000
+
+  private def completion_delay: Time =
+    if (options.defined("vscode_completion_delay")) options.seconds("vscode_completion_delay")
+    else Time.seconds(0.5)
+
   /*VS Code filters a list itself, so the more complete it is, the better*/
   private def prover_options: Options =
-    options.int.update("completion_limit", options.int("vscode_completion_limit"))
+    options.int.update("completion_limit", completion_limit)
 
   def rendering_offset(node_pos: Line.Node_Position): Option[(VSCode_Rendering, Text.Offset)] =
     for {
@@ -440,7 +453,7 @@ class Language_Server(
   /*semantic completion needs the prover's report on the word being typed: wait for it off
     the message loop, which has to keep receiving the edits that produce it*/
   def completion(id: LSP.Id, node_pos: Line.Node_Position): Unit = {
-    val delay = options.seconds("vscode_completion_delay")
+    val delay = completion_delay
     rendering_offset(node_pos) match {
       case Some((rendering, offset)) if !delay.is_zero && rendering.completion_pending(offset) =>
         val content = rendering.model.content
