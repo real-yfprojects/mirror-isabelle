@@ -82,7 +82,7 @@ object VSCode_Rendering {
     }
 
   private def snippet_escape(s: String): String =
-    s.replace("\\", "\\\\").replace("$", "\\$").replace("}", "\\}")
+    s.replace("\\", "\\\\").nn.replace("$", "\\$").nn.replace("}", "\\}").nn
 
   /*the inner languages whose words are names of the formal context*/
   private val inner_languages = Set("term", "prop", "type")
