@@ -459,6 +459,21 @@ object LSP {
   }
 
 
+  object Goto_Command {
+    def apply(id: Long, offset: Symbol.Offset): JSON.T =
+      Notification("PIDE/goto_command", JSON.Object("id" -> id, "offset" -> offset))
+
+    def unapply(json: JSON.T): Option[(Long, Symbol.Offset)] =
+      json match {
+        case Notification("PIDE/goto_command", Some(params)) =>
+          for {
+            id <- JSON.long(params, "id")
+            offset <- JSON.int(params, "offset")
+          } yield (id, offset)
+        case _ => None
+      }
+  }
+
   /* document highlights request */
 
   object DocumentHighlight {

@@ -491,6 +491,12 @@ class Language_Server(
 
   /* document highlights */
 
+  def goto_command(id: Long, offset: Symbol.Offset): Unit =
+    for {
+      snapshot <- editor.current_node_snapshot(())
+      hyperlink <- editor.hyperlink_command(snapshot, id, offset = offset, focus = true)
+    } hyperlink.follow(())
+
   def document_highlights(id: LSP.Id, node_pos: Line.Node_Position): Unit = {
     val result =
       (for ((rendering, offset) <- rendering_offset(node_pos))
@@ -580,6 +586,7 @@ class Language_Server(
           case LSP.Reset_Words() => reset_dictionary()
           case LSP.Hover(id, node_pos) => hover(id, node_pos)
           case LSP.GotoDefinition(id, node_pos) => goto_definition(id, node_pos)
+          case LSP.Goto_Command(id, offset) => goto_command(id, offset)
           case LSP.DocumentHighlights(id, node_pos) => document_highlights(id, node_pos)
           case LSP.CodeActionRequest(id, file, range) => code_action_request(id, file, range)
           case LSP.Decoration_Request(file) => decoration_request(file)
