@@ -16,6 +16,23 @@ object Pretty_Text_Panel {
     channel: Channel,
     output: (String, Option[LSP.Decoration]) => JSON.T
   ): Pretty_Text_Panel = new Pretty_Text_Panel(session, channel, output)
+
+  /* Formatted output as HTML, with definitions linked to their source. Shared with the
+     infoview, which renders several message lists into one notification. */
+  def html(session: VSCode_Session, formatted: XML.Body): String = {
+    val node_context =
+      new Browser_Info.Node_Context {
+        override def make_ref(props: Properties.T, body: XML.Body): Option[XML.Elem] =
+          for {
+            thy_file <- Position.Def_File.unapply(props)
+            def_line <- Position.Def_Line.unapply(props)
+            platform_path <- session.store.source_file(thy_file)
+            uri = File.uri(Path.explode(File.standard_path(platform_path)).absolute_file)
+          } yield HTML.link(uri.toString + "#" + def_line, body)
+      }
+    val elements = Browser_Info.extra_elements.copy(entity = Markup.Elements.full)
+    HTML.source(node_context.make_html(elements, formatted)).toString
+  }
 }
 
 class Pretty_Text_Panel private(
@@ -45,19 +62,7 @@ class Pretty_Text_Panel private(
     if (formatted != current_formatted) {
       val message = {
         if (resources.html_output) {
-          val node_context =
-            new Browser_Info.Node_Context {
-              override def make_ref(props: Properties.T, body: XML.Body): Option[XML.Elem] =
-                for {
-                  thy_file <- Position.Def_File.unapply(props)
-                  def_line <- Position.Def_Line.unapply(props)
-                  platform_path <- session.store.source_file(thy_file)
-                  uri = File.uri(Path.explode(File.standard_path(platform_path)).absolute_file)
-                } yield HTML.link(uri.toString + "#" + def_line, body)
-            }
-          val elements = Browser_Info.extra_elements.copy(entity = Markup.Elements.full)
-          val html = node_context.make_html(elements, formatted)
-          output_json(HTML.source(html).toString, None)
+          output_json(Pretty_Text_Panel.html(session, formatted), None)
         }
         else {
           val converted = resources.output_text_xml(formatted)

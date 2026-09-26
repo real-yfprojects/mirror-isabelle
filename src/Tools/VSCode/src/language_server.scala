@@ -185,6 +185,7 @@ class Language_Server(
   private val theories = new VSCode_Theories(server)
   private val simplifier_trace = new VSCode_Simplifier_Trace(server)
   private val graphview = new VSCode_Graphview(server)
+  private val infoview = new VSCode_Infoview(server)
   private val query = new VSCode_Query(server)
 
   /* The completion options are declared in etc/options, which this code may run without:
@@ -396,6 +397,7 @@ class Language_Server(
       theories.init()
       simplifier_trace.init()
       graphview.init()
+      infoview.init()
       query.init()
 
       try {
@@ -432,6 +434,7 @@ class Language_Server(
         theories.exit()
         simplifier_trace.exit()
         graphview.exit()
+        infoview.exit()
         query.exit()
 
         val result = session.stop()
@@ -702,6 +705,10 @@ class Language_Server(
           case LSP.Documentation_Request() => documentation_request()
           case LSP.Theories_Request() => theories.request()
           case LSP.Graphview_Request() => graphview.request()
+          case LSP.Infoview_Request() => infoview.request()
+          case LSP.Infoview_Pin(id, file, pos) => infoview.pin(id, file, pos)
+          case LSP.Infoview_Unpin(id) => infoview.unpin(id)
+          case LSP.Infoview_Set_Margin(margin) => infoview.set_margin(margin)
           case LSP.Simplifier_Trace_Request() => simplifier_trace.request()
           case LSP.Simplifier_Trace_Reply(serial, answer) =>
             simplifier_trace.reply(serial, answer)

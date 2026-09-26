@@ -915,6 +915,47 @@ object LSP {
   }
 
 
+  /* infoview */
+
+  object Infoview_Request extends Notification0("PIDE/infoview_request")
+
+  object Infoview_Pin {
+    def unapply(json: JSON.T): Option[(Long, JFile, Line.Position)] =
+      json match {
+        case Notification("PIDE/infoview_pin", Some(params)) =>
+          for {
+            id <- JSON.long(params, "id")
+            uri <- JSON.string(params, "uri") if Url.is_wellformed_file(uri)
+            pos <- Position.unapply(params)
+          } yield (id, Url.absolute_file(uri), pos)
+        case _ => None
+      }
+  }
+
+  object Infoview_Unpin {
+    def unapply(json: JSON.T): Option[Long] =
+      json match {
+        case Notification("PIDE/infoview_unpin", Some(params)) => JSON.long(params, "id")
+        case _ => None
+      }
+  }
+
+  object Infoview_Set_Margin {
+    def unapply(json: JSON.T): Option[Double] =
+      json match {
+        case Notification("PIDE/infoview_set_margin", Some(params)) =>
+          JSON.double(params, "margin")
+        case _ => None
+      }
+  }
+
+  object Infoview_Response {
+    def apply(live: Option[JSON.Object.T], pins: List[JSON.Object.T]): JSON.T =
+      Notification("PIDE/infoview_response",
+        JSON.Object("pins" -> pins) ++ JSON.optional("live" -> live))
+  }
+
+
   /* simplifier trace */
 
   object Simplifier_Trace_Request extends Notification0("PIDE/simplifier_trace_request")
