@@ -81,7 +81,7 @@ object VSCode_Rendering {
     }
 
   private def snippet_escape(s: String): String =
-    s.replace("\\", "\\\\").replace("$", "\\$").replace("}", "\\}")
+    s.replace("\\", "\\\\").nn.replace("$", "\\$").nn.replace("}", "\\}").nn
 
   /*word characters would commit a unique item while it is still being typed*/
   private val commit_characters: List[String] =
