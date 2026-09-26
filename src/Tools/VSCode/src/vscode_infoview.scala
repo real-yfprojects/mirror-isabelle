@@ -29,6 +29,65 @@ object VSCode_Infoview {
     (states, urgent ::: regular)
   }
 
+  /* Whether a state holds a goal: Proof_Display.pretty_goal_header marks the word "goal"
+     as keyword1. A state in chain mode ("picking this:") has none. */
+  def has_goal(tree: XML.Tree): Boolean =
+    tree match {
+      case XML.Elem(Markup(Markup.KEYWORD1, _), List(XML.Text("goal"))) => true
+      case XML.Elem(_, body) => body.exists(has_goal)
+      case _ => false
+    }
+
+  /* The goals of the levels around a command, innermost first.
+
+     Proof.pretty_state prints the innermost goal only, so once a proof is inside `have`
+     or `show` nothing it prints mentions the goals that statement is part of -- in jEdit
+     neither. The prover reports no proof depth for a command either (command_indent
+     counts subgoals in apply scripts), but the keywords give the nesting: a goal
+     statement opens a level, a qed closes one, as in Text_Structure's indentation. And
+     each level's goals were printed by the last command at that level before the block
+     inside it began: `proof` before a first `show`, the `by` that closed a sibling
+     before a later one. So this walks back from the command, skipping closed blocks, and
+     at each enclosing level takes the latest state that holds a goal.
+
+     It stops at the theory level: at the statement that opened the proof, at `oops`,
+     after which the count means nothing, and at any command outside a proof. */
+  def enclosing(
+    snapshot: Document.Snapshot,
+    keywords: Keyword.Keywords,
+    command: Command
+  ): List[(Command, List[XML.Elem])] = {
+    val commands = snapshot.node.commands
+    if (!commands.contains(command)) Nil
+    else {
+      val result = List.newBuilder[(Command, List[XML.Elem])]
+      val it = commands.reverse.iterator(command).filterNot(_.is_ignored)
+      var depth = 0
+      var searching = false
+      var done = false
+      while (!done && it.hasNext) {
+        val cmd = it.next()
+        if (searching && depth == 0) {
+          val states = split(snapshot.command_results(cmd))._1.filter(has_goal)
+          if (states.nonEmpty) {
+            result += (cmd -> states)
+            searching = false
+          }
+        }
+        val kind = keywords.kinds.getOrElse(cmd.span.name, "")
+        if (Keyword.qed(kind)) depth += 1
+        else if (Keyword.qed_global(kind)) done = true
+        else if (Keyword.theory_goal(kind) || Keyword.proof_goal(kind)) {
+          if (depth > 0) depth -= 1
+          else if (Keyword.theory_goal(kind)) done = true
+          else searching = true
+        }
+        else if (kind.nonEmpty && !Keyword.proof(kind)) done = true
+      }
+      result.result()
+    }
+  }
+
   def status(snapshot: Document.Snapshot, command: Command): String = {
     val status =
       Document_Status.Command_Status.merge(
@@ -95,17 +154,33 @@ class VSCode_Infoview(server: Language_Server) {
     filter: XML.Elem => Boolean = _ => true
   ): JSON.Object.T = {
     val (states, messages) = VSCode_Infoview.split(snapshot.command_results(command), filter)
-    val source =
-      split_lines(command.source).map(_.trim).find(_.nonEmpty).getOrElse("")
+    val outer =
+      if (command.node_name != model.node_name) Nil
+      else {
+        for ((cmd, goals) <- VSCode_Infoview.enclosing(snapshot, model.syntax().keywords, command))
+        yield {
+          JSON.Object(
+            "line" -> line_of(model, command_offset(snapshot, cmd).getOrElse(0)),
+            "command" -> cmd.span.name,
+            "source" -> first_line(cmd),
+            "goals" -> render(goals))
+        }
+      }
     JSON.Object(
       "uri" -> Url.print_file_name(model.node_name.node),
       "line" -> line,
       "command" -> command.span.name,
-      "source" -> server.resources.output_text(Symbol.explode(source).take(100).mkString),
+      "source" -> first_line(command),
       "status" -> VSCode_Infoview.status(snapshot, command),
       "goals" -> render(states),
+      "outer" -> outer,
       "messages" -> render(messages)) ++
     JSON.optional("id" -> id)
+  }
+
+  private def first_line(command: Command): String = {
+    val source = split_lines(command.source).map(_.trim).find(_.nonEmpty).getOrElse("")
+    server.resources.output_text(Symbol.explode(source).take(100).mkString)
   }
 
 
