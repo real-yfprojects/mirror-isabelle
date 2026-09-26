@@ -50,6 +50,7 @@ object VSCode_Rendering {
   private val semantic_kinds: Map[String, Int] =
     Map(
       Markup.CONSTANT -> LSP.CompletionItemKind.Constant,
+      Markup.FIXED -> LSP.CompletionItemKind.Variable,
       Markup.FACT -> LSP.CompletionItemKind.Reference,
       Markup.TYPE_NAME -> LSP.CompletionItemKind.Struct,
       Markup.CLASS -> LSP.CompletionItemKind.Class,
@@ -82,6 +83,9 @@ object VSCode_Rendering {
 
   private def snippet_escape(s: String): String =
     s.replace("\\", "\\\\").replace("$", "\\$").replace("}", "\\}")
+
+  /*the inner languages whose words are names of the formal context*/
+  private val inner_languages = Set("term", "prop", "type")
 
   /*word characters would commit a unique item while it is still being typed*/
   private val commit_characters: List[String] =
@@ -214,25 +218,88 @@ extends Rendering(snapshot, model.session.resources.options, model.session) {
     }
   }
 
-  /*the prover has yet to report on the word being typed, and may still do so*/
-  def completion_pending(caret: Text.Offset): Boolean =
+  /*the innermost delimited language at a range, if its words are names of the context*/
+  private def inner_language(range: Text.Range): Option[String] =
+    snapshot.select(range, Rendering.language_elements, _ =>
+      {
+        case Text.Info(info_range, XML.Elem(Markup.Language(lang), _)) if lang.delimited =>
+          Some((info_range.length, lang.name))
+        case _ => None
+      }).map(_.info).minByOption(_._1).map(_._2).filter(VSCode_Rendering.inner_languages)
+
+  /*the name being typed: word characters before the caret, from a letter on*/
+  private def word_range(caret: Text.Offset): Option[(Text.Range, String)] =
+    for {
+      text <- get_text(Text.Range((caret - 256) max 0, caret))
+      n = text.reverseIterator.takeWhile(Completion.Word_Parsers.is_word_char).length
+      if n > 0
+      word = text.drop(text.length - n)
+      if Symbol.is_ascii_letter(word(0))
+    } yield (Text.Range(caret - n, caret), word)
+
+  /*within inner syntax: the word before the caret, whether it has to be a type, and the
+    names of its context -- None while the prover has yet to report them*/
+  private def inner_names(caret: Text.Offset, context_names: VSCode_Context_Names)
+      : Option[(Text.Range, String, Boolean, Option[List[VSCode_Context_Names.Name]])] =
+    for {
+      lang <- inner_language(before_caret_range(caret))
+      (range, word) <- word_range(caret)
+      command <- context_names.context_command(snapshot, caret)
+    } yield (range, word, lang == "type", context_names.get(snapshot, command))
+
+  /*the prover has yet to report on the word being typed, and may still do so: within inner
+    syntax, only the names of the context are worth waiting for*/
+  def completion_pending(caret: Text.Offset, context_names: VSCode_Context_Names): Boolean =
     is_word_before(caret) && {
-      if (snapshot.is_outdated) {
-        cached_semantic(caret).forall({ case (cache, word) => !cache.covers(word) })
+      inner_names(caret, context_names) match {
+        case Some((_, _, _, names)) => names.isEmpty
+        case None => semantic_pending(caret)
       }
-      else {
-        val caret_range = before_caret_range(caret)
-        semantic_completion(None, caret_range).isEmpty &&
-          snapshot.node.command_iterator(caret_range).nextOption().exists(
-            { case (command, _) =>
-                !snapshot.state.command_status(snapshot.version, command).is_terminated })
-      }
+    }
+
+  private def semantic_pending(caret: Text.Offset): Boolean =
+    if (snapshot.is_outdated) {
+      cached_semantic(caret).forall({ case (cache, word) => !cache.covers(word) })
+    }
+    else {
+      val caret_range = before_caret_range(caret)
+      semantic_completion(None, caret_range).isEmpty &&
+        snapshot.node.command_iterator(caret_range).nextOption().exists(
+          { case (command, _) =>
+              !snapshot.state.command_status(snapshot.version, command).is_terminated })
+    }
+
+  /*the prover's own report first; within inner syntax, the names of the context otherwise*/
+  private def semantic_or_context_completion(
+    history: Completion.History,
+    unicode_symbols: Boolean,
+    completed_range: Option[Text.Range],
+    caret: Text.Offset,
+    context_names: VSCode_Context_Names
+  ): (Boolean, Option[Completion.Result], Boolean) =
+    vscode_semantic_completion(history, unicode_symbols, completed_range, caret) match {
+      case (false, None, incomplete) =>
+        inner_names(caret, context_names) match {
+          case Some((range, word, types_only, Some(names))) =>
+            val (selected, more) =
+              VSCode_Context_Names.select(names, word, types_only, context_names.completion_limit)
+            val result =
+              Completion.Names(selected.length, selected)
+                .complete(range, history, unicode_symbols, word)
+            (false, result, more || result.isEmpty)
+          case Some((_, _, _, None)) => (false, None, true)
+          case None => (false, None, incomplete)
+        }
+      case res => res
     }
 
   /*items, and whether more typing may bring names the list lacks: VS Code asks again only then,
     and otherwise filters the list itself*/
-  def completion(node_pos: Line.Node_Position, caret: Text.Offset)
-      : (List[LSP.CompletionItem], Boolean) = {
+  def completion(
+    node_pos: Line.Node_Position,
+    caret: Text.Offset,
+    context_names: VSCode_Context_Names
+  ): (List[LSP.CompletionItem], Boolean) = {
     val doc = model.content.doc
     val line = node_pos.line
     val unicode_symbols = resources.unicode_symbols_edits
@@ -249,8 +316,8 @@ extends Rendering(snapshot, model.session.resources.options, model.session) {
             language_context(caret_range) getOrElse syntax.language_context)
 
         val (no_completion, semantic_completion, semantic_incomplete) =
-          vscode_semantic_completion(
-            history, unicode_symbols, syntax_completion.map(_.range), caret)
+          semantic_or_context_completion(
+            history, unicode_symbols, syntax_completion.map(_.range), caret, context_names)
 
         if (no_completion) (Nil, false)
         else {
