@@ -111,6 +111,55 @@ object VSCode_Rendering {
     Set(Rendering.Color.writeln, Rendering.Color.information, Rendering.Color.warning)
 
 
+  /* semantic markup: what the text colours leave plain */
+
+  /*Rendering.text_color paints delimiters like a string, and numerals and entities not at
+    all, so inside a term only the variables stand out. The editor can colour the rest by
+    category (as semantic tokens, through its colour theme); these categories only ever
+    add to the text colours, never override them*/
+  val semantic_categories: List[String] =
+    List("constant", "type_name", "class", "operator", "numeral")
+
+  private val semantic_entity_kinds =
+    Map(Markup.CONSTANT -> "constant", Markup.TYPE_NAME -> "type_name", Markup.CLASS -> "class")
+
+  private val semantic_elements =
+    Rendering.text_color_elements ++ Markup.Elements(Markup.ENTITY, Markup.NUMERAL)
+
+  // "" is markup that already has a text colour of its own: it wins, and yields nothing
+  private def semantic_category(markup: Markup): Option[String] =
+    markup match {
+      case Markup.Entity(kind, _) => semantic_entity_kinds.get(kind)
+      case Markup(Markup.NUMERAL, _) => Some("numeral")
+      case Markup(Markup.DELIMITER, _) => Some("operator")
+      case _ =>
+        Rendering.get_text_color(markup) match {
+          case None | Some(Rendering.Color.main) => None
+          case Some(_) => Some("")
+        }
+    }
+
+  // for one token carrying several markups, e.g. `+`: delimiter and constant `plus`
+  private def semantic_rank(category: String): Int =
+    category match {
+      case "" => 0
+      case "operator" => 1
+      case "numeral" => 2
+      case _ => 3
+    }
+
+  private def semantic_decorations(
+    infos: List[Text.Info[String]]
+  ): List[VSCode_Model.Decoration] = {
+    val ranges =
+      infos.foldLeft(Map.empty[String, List[Text.Range]]) {
+        case (m, Text.Info(range, c)) => m + (c -> (range :: m.getOrElse(c, Nil)))
+      }
+    semantic_categories.map(c =>
+      VSCode_Model.Decoration.ranges("semantic_" + c, ranges.getOrElse(c, Nil).reverse))
+  }
+
+
   /* diagnostic messages */
 
   private val message_severity =
@@ -353,6 +402,34 @@ extends Rendering(snapshot, model.session.resources.options, model.session) {
       })
 
 
+  /* semantic markup */
+
+  /*the innermost markup wins, as in text_color; among the markups of one token the
+    category ranks decide, which is why the accumulated result carries its range.
+    HOL's 0 and 1 are notation, not numeral tokens: a delimiter made of digits is
+    reported as a numeral, which is what it reads as*/
+  def semantic(range: Text.Range): List[Text.Info[String]] =
+    snapshot.cumulate[Option[(Text.Range, String)]](
+      range, None, VSCode_Rendering.semantic_elements, _ =>
+        {
+          case (acc, Text.Info(r, elem)) =>
+            VSCode_Rendering.semantic_category(elem.markup).map(c =>
+              acc match {
+                case Some((r0, c0)) if r0 == r &&
+                  VSCode_Rendering.semantic_rank(c0) <= VSCode_Rendering.semantic_rank(c) => acc
+                case _ => Some((r, c))
+              })
+        }).flatMap(
+          {
+            case Text.Info(r, Some((_, c))) if c.nonEmpty =>
+              val digits =
+                c == "operator" &&
+                  get_text(r).exists(s => s.nonEmpty && s.forall(Symbol.is_ascii_digit))
+              Some(Text.Info(r, if (digits) "numeral" else c))
+            case _ => None
+          })
+
+
   /* text overview color */
 
   private sealed case class Color_Info(
@@ -402,6 +479,8 @@ extends Rendering(snapshot, model.session.resources.options, model.session) {
       foreground(model.content.text_range)) :::
     VSCode_Rendering.color_decorations("text_", Rendering.Color.text_colors,
       snapshot.command_spans().flatMap(info => text_color(info.range))) :::
+    VSCode_Rendering.semantic_decorations(
+      snapshot.command_spans().flatMap(info => semantic(info.range))) :::
     VSCode_Rendering.color_decorations("text_overview_", Rendering.Color.text_overview_colors,
       text_overview_color) :::
     VSCode_Rendering.color_decorations("dotted_", VSCode_Rendering.dotted_colors,
