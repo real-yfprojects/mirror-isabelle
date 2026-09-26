@@ -38,16 +38,25 @@ object Language_Server {
         include_sessions = include_sessions, session_ancestor = session_ancestor,
         session_requirements = session_requirements).check_errors
 
+    /* The session to build is the background's own, not the name that was asked for:
+       with session_requirements (option -R) Sessions.background returns a synthetic
+       "NAME_requirements(ANCESTOR)" session holding the theories NAME imports from other
+       sessions, and that is also what session_heaps then loads. Building the named
+       session instead builds the wrong thing and leaves the required heap missing, so
+       -R started with "Missing heap image for session ..." and nothing was cached.
+       Session.build, which Isabelle/jEdit uses for the same purpose, selects the
+       background's session name. */
     def build(no_build: Boolean = false, progress: Progress = new Progress): Build.Results =
       Build.build(options,
-        selection = Sessions.Selection.session(logic),
+        selection = Sessions.Selection.session(session_background.session_name),
         build_heap = true, no_build = no_build, dirs = session_dirs,
         infos = session_background.infos,
         progress = progress)
 
     if (!session_no_build && !build(no_build = true).ok) {
-      build_started(logic)
-      if (!build(progress = build_progress).ok) build_failed(logic)
+      // Report the session actually being built, which under -R is the requirements image.
+      build_started(session_background.session_name)
+      if (!build(progress = build_progress).ok) build_failed(session_background.session_name)
     }
 
     session_background
@@ -173,6 +182,10 @@ class Language_Server(
   def ml_settings: ML_Settings = session.store.ml_settings
 
   private val sledgehammer = new VSCode_Sledgehammer(server)
+  private val theories = new VSCode_Theories(server)
+  private val simplifier_trace = new VSCode_Simplifier_Trace(server)
+  private val graphview = new VSCode_Graphview(server)
+  private val query = new VSCode_Query(server)
 
   def rendering_offset(node_pos: Line.Node_Position): Option[(VSCode_Rendering, Text.Offset)] =
     for {
@@ -193,8 +206,20 @@ class Language_Server(
       val (invoke_input, invoke_load) =
         resources.resolve_dependencies(session, editor, file_watcher)
       if (invoke_input) editor.invoke()
+      loading_.change(_ => invoke_load)
       if (invoke_load) delay_load.invoke()
     }
+
+  /* Dependency resolution is asynchronous: an opened theory whose imports are not
+     loaded yet has a failing header, which is a transient state rather than an error
+     about the proof. Clients need to be able to tell the two apart. */
+  private val loading_ = Synchronized(false)
+  def loading: Boolean = loading_.value
+
+  private def start_loading(): Unit = {
+    loading_.change(_ => true)
+    delay_load.invoke()
+  }
 
   private def close_document(file: JFile): Unit = {
     if (resources.close_model(file)) {
@@ -304,8 +329,16 @@ class Language_Server(
     val try_session =
       try {
         val progress = channel.progress(verbose = true)
+        /* Feed the build itself, not just the started/failed one-liners: build_progress
+           defaults to the base Progress, whose output is a no-op, so the heap build ran
+           entirely silent. It happens inside "initialize", which does not reply until it
+           finishes, so a cold build was tens of minutes with nothing after "Build started
+           for ..." -- indistinguishable from a hang. This progress is Progress.Status, so
+           it also carries the long-running-command lines that tell a slow proof from a
+           stuck one. */
         val session_background =
           Language_Server.build_session(options, session_name,
+            build_progress = progress,
             session_dirs = session_dirs,
             include_sessions = include_sessions,
             session_ancestor = session_ancestor,
@@ -324,7 +357,7 @@ class Language_Server(
         val session_options = options.bool.update("editor_output_state", true)
         val session =
           new VSCode_Session(session_options, session_resources) {
-            override def deps_changed(): Unit = delay_load.invoke()
+            override def deps_changed(): Unit = start_loading()
           }
 
         Some((session_background, session))
@@ -343,6 +376,10 @@ class Language_Server(
 
       dynamic_output.init()
       sledgehammer.init()
+      theories.init()
+      simplifier_trace.init()
+      graphview.init()
+      query.init()
 
       try {
         Isabelle_Process.start(
@@ -355,10 +392,12 @@ class Language_Server(
     }
   }
 
-  def shutdown(id: LSP.Id): Unit = {
-    def reply(err: String): Unit = channel.write(LSP.Shutdown.reply(id, err))
+  /* Stop the prover, whoever asked.
 
-    session_.change({
+     Factored out of "shutdown" so that end of input can reuse it: the two differ only in
+     whether there is still a client to answer. */
+  private def stop_session(): String =
+    session_.change_result({
       case Some(session) =>
         session.commands_changed -= prover_output
         session.syslog_messages -= syslog_messages
@@ -372,16 +411,18 @@ class Language_Server(
         delay_caret_update.revoke()
         delay_preview.revoke()
         sledgehammer.exit()
+        theories.exit()
+        simplifier_trace.exit()
+        graphview.exit()
+        query.exit()
 
         val result = session.stop()
-        if (result.ok) reply("")
-        else reply("Prover shutdown failed: " + result.rc)
-        None
-      case None =>
-        reply("Prover inactive")
-        None
+        ((if (result.ok) "" else "Prover shutdown failed: " + result.rc), None)
+      case None => ("Prover inactive", None)
     })
-  }
+
+  def shutdown(id: LSP.Id): Unit =
+    channel.write(LSP.Shutdown.reply(id, stop_session()))
 
   def exit(): Unit = {
     log("\n")
@@ -527,7 +568,7 @@ class Language_Server(
           case LSP.Exit() => exit()
           case LSP.DidOpenTextDocument(file, _, version, text) =>
             change_document(file, version, List(LSP.TextDocumentChange(None, text)))
-            delay_load.invoke()
+            start_loading()
           case LSP.DidChangeTextDocument(file, version, changes) =>
             change_document(file, version, changes)
           case LSP.DidCloseTextDocument(file) => close_document(file)
@@ -554,6 +595,20 @@ class Language_Server(
           case LSP.Preview_Request(file, column) => preview_request(file, column)
           case LSP.Abbrevs_Request() => abbrevs_request()
           case LSP.Documentation_Request() => documentation_request()
+          case LSP.Theories_Request() => theories.request()
+          case LSP.Graphview_Request() => graphview.request()
+          case LSP.Simplifier_Trace_Request() => simplifier_trace.request()
+          case LSP.Simplifier_Trace_Reply(serial, answer) =>
+            simplifier_trace.reply(serial, answer)
+          case LSP.Simplifier_Trace_Auto_Update(enabled) =>
+            simplifier_trace.set_auto_update(enabled)
+          case LSP.Simplifier_Trace_Clear_Memory() => simplifier_trace.clear_memory()
+          case LSP.Simplifier_Trace_Show() => simplifier_trace.show_trace()
+          case LSP.Theories_Set_Threshold(threshold) => theories.set_threshold(threshold)
+          case LSP.Query_Operations_Request() => query.operations_response()
+          case LSP.Query_Request(operation, args) => query.request(operation, args)
+          case LSP.Query_Cancel(operation) => query.cancel(operation)
+          case LSP.Query_Locate(operation) => query.locate(operation)
           case LSP.Sledgehammer_Provers_Request() => sledgehammer.provers()
           case LSP.Sledgehammer_Request(args) => sledgehammer.request(args)
           case LSP.Sledgehammer_Cancel() => sledgehammer.cancel()
@@ -573,7 +628,19 @@ class Language_Server(
             case _ => handle(json)
           }
           loop()
-        case None => log("### TERMINATE")
+        /* End of input: the client is gone without having said "shutdown"/"exit", which
+           is what happens whenever an editor dies rather than closes -- a killed process,
+           a crashed extension host, a terminated terminal.
+
+           Merely returning here leaves the session running, and with it the prover and
+           this JVM: nothing else holds a reference to the client, so nothing else will
+           ever notice. Editors that spawn the server therefore accumulated a full prover
+           stack per abandoned run, and there is nobody left to be told about it. So treat
+           EOF as the shutdown the client did not get to send. */
+        case None =>
+          log("### TERMINATE")
+          stop_session()
+          exit()
       }
     }
     loop()

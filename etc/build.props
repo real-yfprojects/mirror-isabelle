@@ -287,11 +287,15 @@ sources = \
   src/Tools/VSCode/src/state_panel.scala \
   src/Tools/VSCode/src/vscode_main.scala \
   src/Tools/VSCode/src/vscode_model.scala \
+  src/Tools/VSCode/src/vscode_query.scala \
   src/Tools/VSCode/src/vscode_rendering.scala \
   src/Tools/VSCode/src/vscode_resources.scala \
   src/Tools/VSCode/src/vscode_session.scala \
   src/Tools/VSCode/src/vscode_sledgehammer.scala \
+  src/Tools/VSCode/src/vscode_graphview.scala \
+  src/Tools/VSCode/src/vscode_simplifier_trace.scala \
   src/Tools/VSCode/src/vscode_spell_checker.scala \
+  src/Tools/VSCode/src/vscode_theories.scala \
   src/Tools/jEdit/src/active.scala \
   src/Tools/jEdit/src/base_plugin.scala \
   src/Tools/jEdit/src/completion_popup.scala \

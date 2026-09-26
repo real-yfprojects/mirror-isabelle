@@ -729,6 +729,52 @@ object LSP {
   }
 
 
+  /* query operations */
+
+  object Query_Operations_Request extends Notification0("PIDE/query_operations_request")
+
+  object Query_Operations_Response {
+    def apply(operations: List[String]): JSON.T =
+      Notification("PIDE/query_operations_response", JSON.Object("operations" -> operations))
+  }
+
+  object Query_Request {
+    def unapply(json: JSON.T): Option[(String, List[String])] =
+      json match {
+        case Notification("PIDE/query_request", Some(params)) =>
+          for {
+            operation <- JSON.string(params, "operation")
+            args <- JSON.strings(params, "args")
+          } yield (operation, args)
+        case _ => None
+      }
+  }
+
+  class Query_Operation_Notification(name: String) {
+    def unapply(json: JSON.T): Option[String] =
+      json match {
+        case Notification(method, Some(params)) if method == name =>
+          JSON.string(params, "operation")
+        case _ => None
+      }
+  }
+
+  object Query_Cancel extends Query_Operation_Notification("PIDE/query_cancel")
+  object Query_Locate extends Query_Operation_Notification("PIDE/query_locate")
+
+  object Query_Status {
+    def apply(operation: String, message: String): JSON.T =
+      Notification("PIDE/query_status",
+        JSON.Object("operation" -> operation, "message" -> message))
+  }
+
+  object Query_Output {
+    def apply(operation: String, content: String): JSON.T =
+      Notification("PIDE/query_output",
+        JSON.Object("operation" -> operation, "content" -> content))
+  }
+
+
   /* sledgehammer */
 
   object Sledgehammer_Provers_Request
@@ -783,5 +829,95 @@ object LSP {
           "line" -> node_pos.pos.line,
           "character" -> node_pos.pos.column,
           "text" -> text))
+  }
+
+
+  /* graphview */
+
+  object Graphview_Request extends Notification0("PIDE/graphview_request")
+
+  object Graphview_Response {
+    def apply(graph: Option[JSON.Object.T], error: Option[String]): JSON.T =
+      Notification("PIDE/graphview_response",
+        JSON.Object() ++ JSON.optional("graph" -> graph) ++ JSON.optional("error" -> error))
+  }
+
+
+  /* simplifier trace */
+
+  object Simplifier_Trace_Request extends Notification0("PIDE/simplifier_trace_request")
+  object Simplifier_Trace_Clear_Memory extends Notification0("PIDE/simplifier_trace_clear_memory")
+  object Simplifier_Trace_Show extends Notification0("PIDE/simplifier_trace_show")
+
+  object Simplifier_Trace_Auto_Update {
+    def unapply(json: JSON.T): Option[Boolean] =
+      json match {
+        case Notification("PIDE/simplifier_trace_auto_update", Some(params)) =>
+          JSON.bool(params, "enabled")
+        case _ => None
+      }
+  }
+
+  object Simplifier_Trace_Reply {
+    def unapply(json: JSON.T): Option[(Long, String)] =
+      json match {
+        case Notification("PIDE/simplifier_trace_reply", Some(params)) =>
+          for {
+            serial <- JSON.long(params, "serial")
+            answer <- JSON.string(params, "answer")
+          } yield (serial, answer)
+        case _ => None
+      }
+  }
+
+  object Simplifier_Trace_Response {
+    def apply(
+      auto_update: Boolean,
+      pending: Int,
+      question: Option[JSON.Object.T]
+    ): JSON.T =
+      Notification("PIDE/simplifier_trace_response",
+        JSON.Object(
+          "auto_update" -> auto_update,
+          "pending" -> pending) ++
+        JSON.optional("question" -> question))
+  }
+
+  object Simplifier_Trace_Full {
+    def apply(entries: List[JSON.Object.T]): JSON.T =
+      Notification("PIDE/simplifier_trace_full", JSON.Object("entries" -> entries))
+  }
+
+
+  /* theories: status and timing */
+
+  object Theories_Request extends Notification0("PIDE/theories_request")
+
+  object Theories_Set_Threshold {
+    def unapply(json: JSON.T): Option[Double] =
+      json match {
+        case Notification("PIDE/theories_set_threshold", Some(params)) =>
+          JSON.double(params, "threshold")
+        case _ => None
+      }
+  }
+
+  object Theories_Response {
+    def apply(
+      phase: String,
+      loading: Boolean,
+      threshold: Double,
+      current: Option[String],
+      nodes: List[JSON.Object.T],
+      commands: List[JSON.Object.T]
+    ): JSON.T =
+      Notification("PIDE/theories_response",
+        JSON.Object(
+          "phase" -> phase,
+          "loading" -> loading,
+          "threshold" -> threshold,
+          "nodes" -> nodes,
+          "commands" -> commands) ++
+        JSON.optional("current" -> current))
   }
 }
