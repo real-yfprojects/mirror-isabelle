@@ -58,7 +58,7 @@ object VSCode_Graphview {
   def parse_browser_graph(text: String): Graph_Display.Graph = {
     val token = """"([^"]*)"|(>)""".r
     Graph_Display.build_graph(
-      for (line <- split_lines(text) if line.trim.nonEmpty)
+      for (line <- split_lines(text) if line.trim.nn.nonEmpty)
       yield {
         val tokens = token.findAllMatchIn(line).map(m => Option(m.group(1))).toList
         val (fields, rest) = tokens.span(_.isDefined)
