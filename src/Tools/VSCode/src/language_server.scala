@@ -629,6 +629,52 @@ class Language_Server(
   }
 
 
+  /* indentation */
+
+  /*answered in any case: the client waits for the reply, and the message loop would only
+    log a failure*/
+  private def indent_edits(file: JFile)(edits: VSCode_Rendering => List[LSP.TextEdit])
+      : List[LSP.TextEdit] =
+    resources.get_rendering(file) match {
+      case Some(rendering) =>
+        try { edits(rendering) }
+        catch {
+          case exn: Throwable if !Exn.is_interrupt(exn) =>
+            channel.log_error_message(Exn.message(exn))
+            Nil
+        }
+      case None => Nil
+    }
+
+  def on_type_formatting(
+    id: LSP.Id,
+    file: JFile,
+    pos: Line.Position,
+    ch: String,
+    format: VSCode_Indent.Format
+  ): Unit = {
+    val edits =
+      indent_edits(file) { rendering =>
+        ch match {
+          case "\n" => VSCode_Indent.on_newline(rendering, pos, format)
+          case " " => VSCode_Indent.on_space(rendering, pos, format)
+          case _ => Nil
+        }
+      }
+    channel.write(LSP.OnTypeFormatting.reply(id, edits))
+  }
+
+  def range_formatting(
+    id: LSP.Id,
+    file: JFile,
+    range: Line.Range,
+    format: VSCode_Indent.Format
+  ): Unit = {
+    val edits = indent_edits(file)(VSCode_Indent.on_range(_, range, format))
+    channel.write(LSP.RangeFormatting.reply(id, edits))
+  }
+
+
   /* abbrevs */
 
   def abbrevs_request(): Unit = {
@@ -672,6 +718,10 @@ class Language_Server(
           case LSP.Goto_Command(id, offset) => goto_command(id, offset)
           case LSP.DocumentHighlights(id, node_pos) => document_highlights(id, node_pos)
           case LSP.CodeActionRequest(id, file, range) => code_action_request(id, file, range)
+          case LSP.OnTypeFormatting(id, file, pos, ch, format) =>
+            on_type_formatting(id, file, pos, ch, format)
+          case LSP.RangeFormatting(id, file, range, format) =>
+            range_formatting(id, file, range, format)
           case LSP.Decoration_Request(file) => decoration_request(file)
           case LSP.Caret_Update(caret) => update_caret(caret)
           case LSP.Output_Set_Margin(margin) => dynamic_output.set_margin(margin)

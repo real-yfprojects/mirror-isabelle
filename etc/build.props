@@ -303,6 +303,7 @@ sources = \
   src/Tools/VSCode/src/vscode_session.scala \
   src/Tools/VSCode/src/vscode_sledgehammer.scala \
   src/Tools/VSCode/src/vscode_graphview.scala \
+  src/Tools/VSCode/src/vscode_indent.scala \
   src/Tools/VSCode/src/vscode_simplifier_trace.scala \
   src/Tools/VSCode/src/vscode_spell_checker.scala \
   src/Tools/VSCode/src/vscode_theories.scala \

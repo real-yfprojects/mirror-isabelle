@@ -136,6 +136,9 @@ object VSCode_Rendering {
 
   private val hyperlink_elements =
     Markup.Elements(Markup.ENTITY, Markup.PATH, Markup.DOC, Markup.POSITION)
+
+  private val indentation_elements =
+    Markup.Elements(Markup.Command_Indent.name)
 }
 
 class VSCode_Rendering(snapshot: Document.Snapshot, val model: VSCode_Model)
@@ -305,6 +308,16 @@ extends Rendering(snapshot, model.session.resources.options, model.session) {
         }
     }
   }
+
+
+  /* indentation */
+
+  def indentation(range: Text.Range): Int =
+    snapshot.select(range, VSCode_Rendering.indentation_elements, _ =>
+      {
+        case Text.Info(_, XML.Elem(Markup.Command_Indent(i), _)) => Some(i)
+        case _ => None
+      }).headOption.map(_.info).getOrElse(0)
 
 
   /* diagnostics */
