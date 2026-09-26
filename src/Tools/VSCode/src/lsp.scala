@@ -169,7 +169,11 @@ object LSP {
         "hoverProvider" -> true,
         "definitionProvider" -> true,
         "documentHighlightProvider" -> true,
-        "codeActionProvider" -> true)
+        "codeActionProvider" -> true,
+        "documentOnTypeFormattingProvider" -> JSON.Object(
+          "firstTriggerCharacter" -> "\n",
+          "moreTriggerCharacter" -> List(" ")),
+        "documentRangeFormattingProvider" -> true)
   }
 
   object Initialized extends Notification0("initialized")
@@ -554,6 +558,52 @@ object LSP {
 
     def reply(id: Id, actions: List[CodeAction]): JSON.T =
       ResponseMessage(id, Some(actions.map(_.json)))
+  }
+
+
+  /* formatting: indentation */
+
+  object FormattingOptions {
+    def unapply(json: JSON.T): Option[VSCode_Indent.Format] =
+      for {
+        tab_size <- JSON.int(json, "tabSize")
+        insert_spaces <- JSON.bool(json, "insertSpaces")
+      } yield VSCode_Indent.Format(tab_size, insert_spaces)
+  }
+
+  object OnTypeFormatting {
+    def unapply(json: JSON.T): Option[(Id, JFile, Line.Position, String, VSCode_Indent.Format)] =
+      json match {
+        case RequestMessage(id, "textDocument/onTypeFormatting", Some(params)) =>
+          for {
+            doc <- JSON.value(params, "textDocument")
+            uri <- JSON.string(doc, "uri") if Url.is_wellformed_file(uri)
+            case Position(pos) <- JSON.value(params, "position")
+            ch <- JSON.string(params, "ch")
+            case FormattingOptions(format) <- JSON.value(params, "options")
+          } yield (id, Url.absolute_file(uri), pos, ch, format)
+        case _ => None
+      }
+
+    def reply(id: Id, edits: List[TextEdit]): JSON.T =
+      ResponseMessage(id, Some(edits.map(_.json)))
+  }
+
+  object RangeFormatting {
+    def unapply(json: JSON.T): Option[(Id, JFile, Line.Range, VSCode_Indent.Format)] =
+      json match {
+        case RequestMessage(id, "textDocument/rangeFormatting", Some(params)) =>
+          for {
+            doc <- JSON.value(params, "textDocument")
+            uri <- JSON.string(doc, "uri") if Url.is_wellformed_file(uri)
+            case Range(range) <- JSON.value(params, "range")
+            case FormattingOptions(format) <- JSON.value(params, "options")
+          } yield (id, Url.absolute_file(uri), range, format)
+        case _ => None
+      }
+
+    def reply(id: Id, edits: List[TextEdit]): JSON.T =
+      ResponseMessage(id, Some(edits.map(_.json)))
   }
 
 
