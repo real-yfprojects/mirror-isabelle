@@ -205,6 +205,8 @@ class Language_Server(
   private def prover_options: Options =
     options.int.update("completion_limit", completion_limit)
 
+  private val context_names = new VSCode_Context_Names(server, completion_limit)
+
   def rendering_offset(node_pos: Line.Node_Position): Option[(VSCode_Rendering, Text.Offset)] =
     for {
       rendering <- resources.get_rendering(new JFile(node_pos.name))
@@ -400,15 +402,18 @@ class Language_Server(
       infoview.init()
       query.init()
 
+      val prelude = VSCode_Context_Names.prelude(log)
       try {
         Isabelle_Process.start(
-          prover_options, session, session_background, session_heaps, modes = modes)
-          .await_startup()
+          prover_options, session, session_background, session_heaps,
+          use_prelude = prelude.map(file => File.platform_path(File.path(file))).toList,
+          modes = modes).await_startup()
         reply_ok(
           "Welcome to Isabelle/" + session_background.session_name +
           Isabelle_System.isabelle_heading())
       }
       catch { case ERROR(msg) => reply_error(msg) }
+      finally { prelude.foreach(_.delete) }
     }
   }
 
@@ -436,6 +441,7 @@ class Language_Server(
         graphview.exit()
         infoview.exit()
         query.exit()
+        context_names.exit()
 
         val result = session.stop()
         ((if (result.ok) "" else "Prover shutdown failed: " + result.rc), None)
@@ -457,8 +463,14 @@ class Language_Server(
     the message loop, which has to keep receiving the edits that produce it*/
   def completion(id: LSP.Id, node_pos: Line.Node_Position): Unit = {
     val delay = completion_delay
+    def pending(rendering: VSCode_Rendering, offset: Text.Offset): Boolean =
+      rendering.completion_pending(offset, context_names)
+    def complete(rendering: VSCode_Rendering, offset: Text.Offset)
+        : (List[LSP.CompletionItem], Boolean) =
+      rendering.completion(node_pos, offset, context_names)
+
     rendering_offset(node_pos) match {
-      case Some((rendering, offset)) if !delay.is_zero && rendering.completion_pending(offset) =>
+      case Some((rendering, offset)) if !delay.is_zero && pending(rendering, offset) =>
         val content = rendering.model.content
         val deadline = Time.now() + delay
         Isabelle_Thread.fork(name = "completion", daemon = true) {
@@ -466,7 +478,7 @@ class Language_Server(
             rendering_offset(node_pos) match {
               case Some((rendering1, _)) if rendering1.model.content ne content => None
               case Some((rendering1, offset1))
-              if rendering1.completion_pending(offset1) && Time.now() < deadline =>
+              if pending(rendering1, offset1) && Time.now() < deadline =>
                 Time.seconds(0.05).sleep()
                 wait()
               case res => res
@@ -474,7 +486,7 @@ class Language_Server(
           val (result, incomplete) =
             try {
               wait().map({ case (rendering1, offset1) =>
-                rendering1.completion(node_pos, offset1) }).getOrElse((Nil, false))
+                complete(rendering1, offset1) }).getOrElse((Nil, false))
             }
             catch { case exn: Throwable if !Exn.is_interrupt(exn) =>
               channel.log_error_message(Exn.message(exn))
@@ -484,7 +496,7 @@ class Language_Server(
         }
       case res =>
         val (result, incomplete) =
-          (for ((rendering, offset) <- res) yield rendering.completion(node_pos, offset))
+          (for ((rendering, offset) <- res) yield complete(rendering, offset))
             .getOrElse((Nil, false))
         channel.write(LSP.Completion.reply(id, result, incomplete))
     }
