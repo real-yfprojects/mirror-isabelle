@@ -50,16 +50,23 @@ object VSCode_Context_Names {
   /*roughly what VS Code's own filter accepts: the first character of the word at the start
     of a part of the name, the others in order after it, ignoring case. So the list covers
     every extension of the word, and VS Code narrows it down by itself as the word grows*/
-  def matches(word: String, xname: String): Boolean = {
+  def matches(word: String, xname: String, anywhere: Boolean = true): Boolean = {
     val w = Word.lowercase(word)
     val x = Word.lowercase(xname)
 
     @tailrec def rest(i: Int, j: Int): Boolean =
       i == w.length || (j < x.length && rest(if (x(j) == w(i)) i + 1 else i, j + 1))
 
-    w.nonEmpty && x.indices.exists(j =>
-      (j == 0 || x(j - 1) == '.' || x(j - 1) == '_') && x(j) == w(0) && rest(1, j + 1))
+    def start(j: Int): Boolean =
+      j == 0 || anywhere && (x(j - 1) == '.' || x(j - 1) == '_')
+
+    w.nonEmpty && x.indices.exists(j => start(j) && x(j) == w(0) && rest(1, j + 1))
   }
+
+  /*a word with a qualifier ("PosReal.", "PosReal.pp") asks for the names under it: those
+    that begin with it, the rest of the word matched as a word*/
+  private def matches_qualified(qualifier: String, rest: String, xname: String): Boolean =
+    xname.startsWith(qualifier) && (rest.isEmpty || matches(rest, xname.drop(qualifier.length)))
 
   private def kind_rank(kind: String): Int =
     kind match {
@@ -68,12 +75,27 @@ object VSCode_Context_Names {
       case _ => 2
     }
 
-  /*the names for a word, fixed variables first, and whether there are more than the limit*/
+  /*the names for a word, fixed variables first, and whether there are more than the limit.
+    A name comes in each form that refers to it, the shortest first; a longer, qualified form
+    only when the word begins it or names its qualifier -- otherwise List.append would follow
+    append everywhere*/
   def select(names: List[Name], word: String, types_only: Boolean, limit: Int)
       : (List[Name], Boolean) = {
+    val qualified =
+      word.lastIndexOf('.') match {
+        case -1 => None
+        case i => Some((word.take(i + 1), word.drop(i + 1)))
+      }
+    val seen = scala.collection.mutable.Set.empty[(String, String)]
     val selected =
-      names.filter({ case (xname, (kind, _)) =>
-        (!types_only || kind == Markup.TYPE_NAME) && matches(word, xname) })
+      names.filter({ case (xname, entity @ (kind, _)) =>
+        val shortest = seen.add(entity)
+        (!types_only || kind == Markup.TYPE_NAME) &&
+          (qualified match {
+            case Some((qualifier, rest)) => matches_qualified(qualifier, rest, xname)
+            case None => matches(word, xname, anywhere = shortest)
+          })
+      })
       .sortBy({ case (xname, (kind, _)) =>
         (kind_rank(kind), !xname.startsWith(word), xname.length, xname) })
     (selected.take(limit), selected.length > limit)
