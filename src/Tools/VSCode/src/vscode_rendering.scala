@@ -237,10 +237,10 @@ extends Rendering(snapshot, model.session.resources.options, model.session) {
       if Symbol.is_ascii_letter(word(0))
     } yield (Text.Range(caret - n, caret), word)
 
-  /*within inner syntax: the word before the caret, whether it has to be a type, and the
-    names of its context -- None while the prover has yet to report them*/
+  /*within inner syntax: the word before the caret, whether it has to be a type, and its
+    context -- None while the prover has yet to report it*/
   private def inner_names(caret: Text.Offset, context_names: VSCode_Context_Names)
-      : Option[(Text.Range, String, Boolean, Option[List[VSCode_Context_Names.Name]])] =
+      : Option[(Text.Range, String, Boolean, Option[VSCode_Context_Names.Context])] =
     for {
       lang <- inner_language(before_caret_range(caret))
       (range, word) <- word_range(caret)
@@ -252,7 +252,7 @@ extends Rendering(snapshot, model.session.resources.options, model.session) {
   def completion_pending(caret: Text.Offset, context_names: VSCode_Context_Names): Boolean =
     is_word_before(caret) && {
       inner_names(caret, context_names) match {
-        case Some((_, _, _, names)) => names.isEmpty
+        case Some((_, _, _, context)) => context.isEmpty
         case None => semantic_pending(caret)
       }
     }
@@ -269,7 +269,8 @@ extends Rendering(snapshot, model.session.resources.options, model.session) {
               !snapshot.state.command_status(snapshot.version, command).is_terminated })
     }
 
-  /*the prover's own report first; within inner syntax, the names of the context otherwise*/
+  /*the prover's own report first, without the parameters of class instances; within inner
+    syntax, the names of the context otherwise*/
   private def semantic_or_context_completion(
     history: Completion.History,
     unicode_symbols: Boolean,
@@ -280,9 +281,10 @@ extends Rendering(snapshot, model.session.resources.options, model.session) {
     vscode_semantic_completion(history, unicode_symbols, completed_range, caret) match {
       case (false, None, incomplete) =>
         inner_names(caret, context_names) match {
-          case Some((range, word, types_only, Some(names))) =>
+          case Some((range, word, types_only, Some(context))) =>
             val (selected, more) =
-              VSCode_Context_Names.select(names, word, types_only, context_names.completion_limit)
+              VSCode_Context_Names.select(
+                context.names, word, types_only, context_names.completion_limit)
             val result =
               Completion.Names(selected.length, selected)
                 .complete(range, history, unicode_symbols, word)
@@ -290,6 +292,13 @@ extends Rendering(snapshot, model.session.resources.options, model.session) {
           case Some((_, _, _, None)) => (false, None, true)
           case None => (false, None, incomplete)
         }
+      /*until the context's list is in, by their shape -- and asked again then*/
+      case (false, Some(result), incomplete) if VSCode_Context_Names.has_constants(result) =>
+        val context =
+          context_names.context_command(snapshot, caret).flatMap(context_names.get(snapshot, _))
+        val result1 =
+          VSCode_Context_Names.without_inst_params(result, context.map(_.inst_params))
+        (false, result1, incomplete || context.isEmpty && !result1.contains(result))
       case res => res
     }
 
