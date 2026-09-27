@@ -38,19 +38,27 @@ fun fixed_names ctxt =
     if x = "" orelse Name.is_internal x orelse Name.is_skolem x then NONE
     else SOME (x, (Markup.fixedN, x)));
 
-(*not the parameters of class instances (e.g. partial_term_of_real_inst.partial_term_of_real):
-  one writes the overloaded constant of the class instead*)
-fun context_names ctxt =
-  let val thy = Proof_Context.theory_of ctxt in
+(*the parameters of class instances (e.g. plus_nat_inst.plus_nat): the overloaded constant
+  of the class is defined as one of them for each instance, and code generation works with
+  them, but a term that names one matches no rule about the class's constant*)
+fun inst_params ctxt =
+  let val thy = Proof_Context.theory_of ctxt
+  in filter (is_some o Axclass.inst_of_param thy) (Name_Space.get_names (Proof_Context.const_space ctxt)) end;
+
+(*the names of the context, without the parameters of class instances*)
+fun context_names ctxt params =
+  let val excluded = Symtab.make_set params in
     fixed_names ctxt @
     space_names ctxt Markup.constantN (Proof_Context.const_space ctxt)
-      (is_none o Axclass.inst_of_param thy) @
+      (not o Symtab.defined excluded) @
     space_names ctxt Markup.type_nameN (Proof_Context.type_space ctxt) (K true)
   end;
 
-fun encode names =
+(*the names, and the parameters of class instances: to filter them from the prover's own
+  completion reports as well*)
+fun encode (names, params) =
   let open XML.Encode
-  in pair int (list (pair string (pair string string))) (length names, names) end;
+  in pair (list (pair string (pair string string))) (list string) (names, params) end;
 
 in
 
@@ -60,10 +68,12 @@ val _ =
   Query_Operation.register {name = "vscode_context_names", pri = Task_Queue.urgent_pri}
     (fn {state, output_result, ...} =>
       let
-        val names =
+        val result =
           (case try Toplevel.context_of state of
-            SOME ctxt => context_names ctxt
-          | NONE => []);
-      in output_result [YXML.string_of_body (encode names)] end);
+            SOME ctxt =>
+              let val params = inst_params ctxt
+              in (context_names ctxt params, params) end
+          | NONE => ([], []));
+      in output_result [YXML.string_of_body (encode result)] end);
 
 end;

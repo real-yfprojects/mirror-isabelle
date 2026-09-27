@@ -21,6 +21,42 @@ object VSCode_Context_Names {
 
   val print_function = "vscode_context_names_query"
 
+  /*what the query reports: the names of a context, and its parameters of class instances
+    (plus_nat_inst.plus_nat), which completion never offers*/
+  sealed case class Context(names: List[Name], inst_params: Set[String])
+
+  val no_context: Context = Context(Nil, Set.empty)
+
+
+  /* the prover's own reports */
+
+  private val constant_prefix = Markup.CONSTANT + "."
+
+  private def constant_of(item: Completion.Item): Option[String] =
+    if (item.name.startsWith(constant_prefix)) Some(item.name.drop(constant_prefix.length))
+    else None
+
+  def has_constants(result: Completion.Result): Boolean =
+    result.items.exists(constant_of(_).isDefined)
+
+  /*a report of the prover without the parameters of class instances -- which it lists
+    along with the other constants for a name that it rejects: exactly by the context's
+    list, or by their shape (<class>_<type>_inst.<const>_<type>) while that is to come*/
+  def without_inst_params(result: Completion.Result, inst_params: Option[Set[String]])
+      : Option[Completion.Result] = {
+    def is_param(c: String): Boolean =
+      inst_params match {
+        case Some(params) => params(c)
+        case None =>
+          Long_Name.explode(c).reverse match {
+            case _ :: qualifier :: _ => qualifier.endsWith("_inst")
+            case _ => false
+          }
+      }
+    val items = result.items.filterNot(item => constant_of(item).exists(is_param))
+    if (items.isEmpty) None else Some(result.copy(items = items))
+  }
+
 
   /* ML prelude: the query operation, as a resource of this module */
 
@@ -104,13 +140,13 @@ object VSCode_Context_Names {
 
   /* entries */
 
-  private sealed case class Entry(command: Command, instance: String, names: Option[List[Name]])
+  private sealed case class Entry(command: Command, instance: String, context: Option[Context])
 
   private val max_entries = 4
 }
 
 class VSCode_Context_Names(server: Language_Server, limit: Int) {
-  import VSCode_Context_Names.{Name, Entry}
+  import VSCode_Context_Names.{Context, Entry}
 
   def completion_limit: Int = limit
 
@@ -150,8 +186,8 @@ class VSCode_Context_Names(server: Language_Server, limit: Int) {
 
   /* names */
 
-  /*the result of the query, if it is there: its names, or none when it failed*/
-  private def result(snapshot: Document.Snapshot, entry: Entry): Option[List[Name]] = {
+  /*the result of the query, if it is there: its context, or an empty one when it failed*/
+  private def result(snapshot: Document.Snapshot, entry: Entry): Option[Context] = {
     val results =
       for {
         case (_, XML.Elem(Markup(Markup.RESULT, Markup.Instance(instance)), body))
@@ -163,7 +199,9 @@ class VSCode_Context_Names(server: Language_Server, limit: Int) {
       results.flatMap(body =>
         try {
           import XML.Decode._
-          Some(pair(int, list(pair(string, pair(string, string))))(body)._2)
+          val (names, inst_params) =
+            pair(list(pair(string, pair(string, string))), list(string))(body)
+          Some(Context(names, inst_params.toSet))
         }
         catch { case _: XML.Error => None }).nextOption()
 
@@ -175,28 +213,28 @@ class VSCode_Context_Names(server: Language_Server, limit: Int) {
                 List(XML.Elem(Markup(Markup.FINISHED, _), _)))) => instance == entry.instance
             case _ => false
           })
-      if (finished) Some(Nil) else None
+      if (finished) Some(VSCode_Context_Names.no_context) else None
     }
   }
 
-  /*the names visible to the text after a command, or None while the prover has yet to
-    report them: asks for them at once*/
-  def get(snapshot: Document.Snapshot, command: Command): Option[List[Name]] = {
+  /*the context of the text after a command, or None while the prover has yet to report
+    it: asks for it at once*/
+  def get(snapshot: Document.Snapshot, command: Command): Option[Context] = {
     val (res, inserted, removed) =
       entries.change_result { list =>
         list.find(_.command == command) match {
-          case Some(Entry(_, _, Some(names))) => ((Some(names), None, Nil), list)
+          case Some(Entry(_, _, Some(context))) => ((Some(context), None, Nil), list)
           case Some(entry) =>
             result(snapshot, entry) match {
-              case Some(names) =>
-                val entry1 = entry.copy(names = Some(names))
-                ((Some(names), None, List(entry)), entry1 :: list.filterNot(_ == entry))
+              case Some(context) =>
+                val entry1 = entry.copy(context = Some(context))
+                ((Some(context), None, List(entry)), entry1 :: list.filterNot(_ == entry))
               case None => ((None, None, Nil), list)
             }
           case None =>
             val entry = Entry(command, Document_ID.make().toString, None)
             val (keep, drop) = (entry :: list).splitAt(VSCode_Context_Names.max_entries)
-            ((None, Some(entry), drop.filter(_.names.isEmpty)), keep)
+            ((None, Some(entry), drop.filter(_.context.isEmpty)), keep)
         }
       }
     inserted.foreach(overlay(true, _))
