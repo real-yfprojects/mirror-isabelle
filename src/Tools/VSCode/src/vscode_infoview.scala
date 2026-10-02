@@ -38,7 +38,8 @@ object VSCode_Infoview {
       case _ => false
     }
 
-  /* The goals of the levels around a command, innermost first.
+  /* The goals of the levels around a command: its own level's, and each enclosing
+     level's, innermost first.
 
      Proof.pretty_state prints the innermost goal only, so once a proof is inside `have`
      or `show` nothing it prints mentions the goals that statement is part of -- in jEdit
@@ -48,43 +49,53 @@ object VSCode_Infoview {
      each level's goals were printed by the last command at that level before the block
      inside it began: `proof` before a first `show`, the `by` that closed a sibling
      before a later one. So this walks back from the command, skipping closed blocks, and
-     at each enclosing level takes the latest state that holds a goal.
+     at each level takes the latest state that holds a goal.
 
-     It stops at the theory level: at the statement that opened the proof, at `oops`,
-     after which the count means nothing, and at any command outside a proof. */
-  def enclosing(
+     The command's own level is found the same way, starting with the command itself, so
+     it is the command's own goal unless the command printed none: a diag command like
+     `try` prints no state at all (Keyword.is_printed), and one that chains facts like
+     `then` prints the facts without the goal. Neither changes the goal, so it is the one
+     the command before left. Diag and document commands are passed over for the same
+     reason.
+
+     It stops at the theory level: at the statement whose proof the command is in, or
+     whose proof is behind it, at `oops`, after which the count means nothing, and at any
+     other command outside a proof. */
+  def levels(
     snapshot: Document.Snapshot,
     keywords: Keyword.Keywords,
     command: Command
-  ): List[(Command, List[XML.Elem])] = {
+  ): (Option[(Command, List[XML.Elem])], List[(Command, List[XML.Elem])]) = {
     val commands = snapshot.node.commands
-    if (!commands.contains(command)) Nil
+    if (!commands.contains(command)) (None, Nil)
     else {
-      val result = List.newBuilder[(Command, List[XML.Elem])]
+      var current: Option[(Command, List[XML.Elem])] = None
+      val enclosing = List.newBuilder[(Command, List[XML.Elem])]
       val it = commands.reverse.iterator(command).filterNot(_.is_ignored)
       var depth = 0
-      var searching = false
+      var level = 0
+      var searching = true
       var done = false
       while (!done && it.hasNext) {
         val cmd = it.next()
         if (searching && depth == 0) {
           val states = split(snapshot.command_results(cmd))._1.filter(has_goal)
           if (states.nonEmpty) {
-            result += (cmd -> states)
+            if (level == 0) current = Some(cmd -> states)
+            else enclosing += (cmd -> states)
             searching = false
           }
         }
         val kind = keywords.kinds.getOrElse(cmd.span.name, "")
         if (Keyword.qed(kind)) depth += 1
-        else if (Keyword.qed_global(kind)) done = true
-        else if (Keyword.theory_goal(kind) || Keyword.proof_goal(kind)) {
+        else if (Keyword.qed_global(kind) || Keyword.theory_goal(kind)) done = true
+        else if (Keyword.proof_goal(kind)) {
           if (depth > 0) depth -= 1
-          else if (Keyword.theory_goal(kind)) done = true
-          else searching = true
+          else { level += 1; searching = true }
         }
-        else if (kind.nonEmpty && !Keyword.proof(kind)) done = true
+        else if (kind.nonEmpty && !Keyword.proof(kind) && !Keyword.vacuous(kind)) done = true
       }
-      result.result()
+      (current, enclosing.result())
     }
   }
 
@@ -154,18 +165,17 @@ class VSCode_Infoview(server: Language_Server) {
     filter: XML.Elem => Boolean = _ => true
   ): JSON.Object.T = {
     val (states, messages) = VSCode_Infoview.split(snapshot.command_results(command), filter)
-    val outer =
-      if (command.node_name != model.node_name) Nil
-      else {
-        for ((cmd, goals) <- VSCode_Infoview.enclosing(snapshot, model.syntax().keywords, command))
-        yield {
-          JSON.Object(
-            "line" -> line_of(model, command_offset(snapshot, cmd).getOrElse(0)),
-            "command" -> cmd.span.name,
-            "source" -> first_line(cmd),
-            "goals" -> render(goals))
-        }
-      }
+    val (current, outer) =
+      if (command.node_name != model.node_name) (None, Nil)
+      else VSCode_Infoview.levels(snapshot, model.syntax().keywords, command)
+    def level(cmd: Command, goals: List[XML.Elem]): JSON.Object.T =
+      JSON.Object(
+        "line" -> line_of(model, command_offset(snapshot, cmd).getOrElse(0)),
+        "command" -> cmd.span.name,
+        "source" -> first_line(cmd),
+        "goals" -> render(goals))
+    JSON.optional("current" ->
+      current.collect({ case (cmd, goals) if cmd != command => level(cmd, goals) })) ++
     JSON.Object(
       "uri" -> Url.print_file_name(model.node_name.node),
       "line" -> line,
@@ -173,7 +183,7 @@ class VSCode_Infoview(server: Language_Server) {
       "source" -> first_line(command),
       "status" -> VSCode_Infoview.status(snapshot, command),
       "goals" -> render(states),
-      "outer" -> outer,
+      "outer" -> outer.map({ case (cmd, goals) => level(cmd, goals) }),
       "messages" -> render(messages)) ++
     JSON.optional("id" -> id)
   }
