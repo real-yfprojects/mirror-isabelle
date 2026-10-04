@@ -65,16 +65,22 @@ object VSCode_Context_Names {
     as part of a jar*/
   private val ml_resource = "isabelle/vscode/vscode_completion.ML"
 
-  def prelude(log: Logger): Option[JFile] = {
+  def prelude(log: Logger): Option[JFile] =
+    ml_prelude(log, ml_resource, "vscode_completion",
+      "no completion of names within inner syntax")
+
+  /*an ML resource of this module as a temporary file, for use_prelude*/
+  def ml_prelude(log: Logger, resource: String, name: String, missing: String)
+      : Option[JFile] = {
     val loader = getClass.getClassLoader
-    val stream = if (loader == null) null else loader.getResourceAsStream(ml_resource)
+    val stream = if (loader == null) null else loader.getResourceAsStream(resource)
     if (stream == null) {
-      log("No " + ml_resource + ": no completion of names within inner syntax")
+      log("No " + resource + ": " + missing)
       None
     }
     else {
       val text = using(stream)(s => new String(s.readAllBytes, UTF8.charset))
-      val file = Isabelle_System.tmp_file("vscode_completion", ext = "ML")
+      val file = Isabelle_System.tmp_file(name, ext = "ML")
       File.write(file, text)
       Some(file)
     }
