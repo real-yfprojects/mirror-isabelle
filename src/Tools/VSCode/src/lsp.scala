@@ -148,7 +148,22 @@ object LSP {
 
   /* init and exit */
 
-  object Initialize extends Request0("initialize") {
+  object Initialize {
+    /*whether the client renders HTML in hovers (MarkdownString.supportHtml): its
+      initializationOptions say so, as htmlHovers*/
+    def unapply(json: JSON.T): Option[(Id, Boolean)] =
+      json match {
+        case RequestMessage(id, "initialize", params) =>
+          val html_hovers =
+            for {
+              p <- params
+              options <- JSON.value(p, "initializationOptions")
+              b <- JSON.bool(options, "htmlHovers")
+            } yield b
+          Some((id, html_hovers.getOrElse(false)))
+        case _ => None
+      }
+
     def reply(id: Id, error: String): JSON.T =
       ResponseMessage.strict(
         id, Some(JSON.Object("capabilities" -> ServerCapabilities.json)), error)
@@ -455,6 +470,18 @@ object LSP {
           case Some((range, contents)) =>
             JSON.Object(
               "contents" -> MarkedStrings.json(contents).getOrElse(Nil),
+              "range" -> Range(range))
+          case None => JSON.Object("contents" -> Nil)
+        }
+      ResponseMessage(id, Some(res))
+    }
+
+    def reply_markdown(id: Id, result: Option[(Line.Range, String)]): JSON.T = {
+      val res =
+        result match {
+          case Some((range, markdown)) =>
+            JSON.Object(
+              "contents" -> JSON.Object("kind" -> "markdown", "value" -> markdown),
               "range" -> Range(range))
           case None => JSON.Object("contents" -> Nil)
         }

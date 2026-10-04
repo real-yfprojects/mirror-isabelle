@@ -7,7 +7,8 @@ resources = \
   lib/logo/isabelle_transparent.gif:isabelle/ \
   src/Tools/VSCode/src/vscode_completion.ML:isabelle/vscode/ \
   src/Tools/VSCode/src/vscode_sledgehammer.ML:isabelle/vscode/ \
-  src/Tools/VSCode/src/vscode_skeletons.ML:isabelle/vscode/
+  src/Tools/VSCode/src/vscode_skeletons.ML:isabelle/vscode/ \
+  src/Tools/VSCode/src/vscode_hover.ML:isabelle/vscode/
 sources = \
   src/HOL/SPARK/Tools/spark.scala \
   src/HOL/Tools/ATP/system_on_tptp.scala \
@@ -290,6 +291,7 @@ sources = \
   src/Tools/VSCode/src/state_panel.scala \
   src/Tools/VSCode/src/vscode_context_names.scala \
   src/Tools/VSCode/src/vscode_entities.scala \
+  src/Tools/VSCode/src/vscode_hover_info.scala \
   src/Tools/VSCode/src/vscode_main.scala \
   src/Tools/VSCode/src/vscode_model.scala \
   src/Tools/VSCode/src/vscode_query.scala \

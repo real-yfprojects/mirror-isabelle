@@ -17,21 +17,48 @@ object Pretty_Text_Panel {
     output: (String, Option[LSP.Decoration]) => JSON.T
   ): Pretty_Text_Panel = new Pretty_Text_Panel(session, channel, output)
 
+  /* The type of an atom, or the sort of a type variable, that printing wraps around it
+     (show_markup, as in every interactive session). Browser_Info drops what an element
+     wraps, so it is carried to make_ref as an entity of a kind of its own, and becomes the
+     title of a span: what jEdit shows on hover. */
+  private val typing_kind = "vscode_typing"
+  private val typing_title = "vscode_typing_title"
+
+  private def typings(session: VSCode_Session, body: XML.Body): XML.Body =
+    body.map {
+      case XML.Wrapped_Elem(Markup(name, _), wrapped, body1)
+      if name == Markup.TYPING || name == Markup.SORTING =>
+        val title =
+          ":: " + session.resources.output_text(Pretty.unformatted_string_of(wrapped))
+        XML.Elem(
+          Markup(Markup.ENTITY, Markup.Kind(typing_kind) ::: List(typing_title -> title)),
+          typings(session, body1))
+      case XML.Wrapped_Elem(markup, wrapped, body1) =>
+        XML.Wrapped_Elem(markup, wrapped, typings(session, body1))
+      case XML.Elem(markup, body1) => XML.Elem(markup, typings(session, body1))
+      case text => text
+    }
+
   /* Formatted output as HTML, with definitions linked to their source. Shared with the
      infoview, which renders several message lists into one notification. */
   def html(session: VSCode_Session, formatted: XML.Body): String = {
     val node_context =
       new Browser_Info.Node_Context {
         override def make_ref(props: Properties.T, body: XML.Body): Option[XML.Elem] =
-          for {
-            thy_file <- Position.Def_File.unapply(props)
-            def_line <- Position.Def_Line.unapply(props)
-            platform_path <- session.store.source_file(thy_file)
-            uri = File.uri(Path.explode(File.standard_path(platform_path)).absolute_file)
-          } yield HTML.link(uri.toString + "#" + def_line, body)
+          if (Markup.Kind.get(props) == typing_kind) {
+            val title = props.collectFirst({ case (`typing_title`, t) => t }).getOrElse("")
+            Some(XML.Elem(Markup("span", List("class" -> "typing", "title" -> title)), body))
+          }
+          else
+            for {
+              thy_file <- Position.Def_File.unapply(props)
+              def_line <- Position.Def_Line.unapply(props)
+              platform_path <- session.store.source_file(thy_file)
+              uri = File.uri(Path.explode(File.standard_path(platform_path)).absolute_file)
+            } yield HTML.link(uri.toString + "#" + def_line, body)
       }
     val elements = Browser_Info.extra_elements.copy(entity = Markup.Elements.full)
-    HTML.source(node_context.make_html(elements, formatted)).toString
+    HTML.source(node_context.make_html(elements, typings(session, formatted))).toString
   }
 }
 

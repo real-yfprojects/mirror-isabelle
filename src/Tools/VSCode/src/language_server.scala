@@ -230,6 +230,16 @@ class Language_Server(
   private val context_names = new VSCode_Context_Names(server, completion_limit)
   private val skeletons = new VSCode_Skeletons(server)
 
+  private val hover_info = new VSCode_Hover_Info(server)
+
+  /*how long a hover waits for the prover to say what a name stands for*/
+  private def hover_delay: Time =
+    if (options.defined("vscode_hover_delay")) options.seconds("vscode_hover_delay")
+    else Time.seconds(1.5)
+
+  /*whether the client renders HTML in hovers, as its initialize request says*/
+  @volatile private var html_hovers = false
+
   def rendering_offset(node_pos: Line.Node_Position): Option[(VSCode_Rendering, Text.Offset)] =
     for {
       rendering <- resources.get_rendering(new JFile(node_pos.name))
@@ -426,7 +436,7 @@ class Language_Server(
       query.init()
 
       val prelude = List(VSCode_Context_Names.prelude(log), VSCode_Sledgehammer.prelude(log),
-        VSCode_Skeletons.prelude(log)).flatten
+        VSCode_Skeletons.prelude(log), VSCode_Hover_Info.prelude(log)).flatten
       try {
         Isabelle_Process.start(
           prover_options, session, session_background, session_heaps,
@@ -467,6 +477,7 @@ class Language_Server(
         query.exit()
         context_names.exit()
         skeletons.exit()
+        hover_info.exit()
 
         val result = session.stop()
         ((if (result.ok) "" else "Prover shutdown failed: " + result.rc), None)
@@ -553,18 +564,96 @@ class Language_Server(
 
   /* hover */
 
-  def hover(id: LSP.Id, node_pos: Line.Node_Position): Unit = {
-    val result =
-      for {
-        (rendering, offset) <- rendering_offset(node_pos)
-        info <- rendering.tooltips(VSCode_Rendering.tooltip_elements, Text.Range(offset, offset + 1))
-      } yield {
-        val range = rendering.model.content.doc.range(info.range)
-        val contents = info.info.map(t => LSP.MarkedString(resources.output_pretty_tooltip(List(t))))
-        (range, contents)
-      }
-    channel.write(LSP.Hover.reply(id, result))
+  /*the PIDE tooltips at an offset, after what the hover info query says about the name
+    there; as HTML with links where the client renders that, as plain text otherwise*/
+  private def hover_reply(
+    id: LSP.Id,
+    rendering: VSCode_Rendering,
+    offset: Text.Offset,
+    info: Option[(Text.Range, XML.Body)]
+  ): JSON.T = {
+    val tooltips =
+      rendering.tooltips(VSCode_Rendering.tooltip_elements, Text.Range(offset, offset + 1))
+    val bodies =
+      info.map(_._2).filter(_.nonEmpty).toList :::
+        tooltips.toList.flatMap(_.info.map(List(_)))
+    val text_range = tooltips.map(_.range) orElse info.map(_._1)
+    (bodies, text_range) match {
+      case (_ :: _, Some(r)) =>
+        val range = rendering.model.content.doc.range(r)
+        if (html_hovers) {
+          val markdown =
+            bodies.map(resources.html_pretty_tooltip(_, rendering.hover_link)).mkString("\n\n")
+          LSP.Hover.reply_markdown(id, Some((range, markdown)))
+        }
+        else {
+          LSP.Hover.reply(id,
+            Some((range, bodies.map(b => LSP.MarkedString(resources.output_pretty_tooltip(b))))))
+        }
+      case _ => LSP.Hover.reply(id, None)
+    }
   }
+
+  /*the hover info at an offset, from the first context that has any: None while the prover
+    has yet to give it*/
+  private def hover_info_at(rendering: VSCode_Rendering, offset: Text.Offset)
+      : Option[Option[(Text.Range, XML.Body)]] =
+    rendering.hover_request(offset, context_names) match {
+      case Some((range, requests)) =>
+        @tailrec def first(rest: List[VSCode_Hover_Info.Request]): Option[XML.Body] =
+          rest match {
+            case Nil => Some(Nil)
+            case request :: more =>
+              hover_info.get(rendering.snapshot, request) match {
+                case Some(Nil) => first(more)
+                case res => res
+              }
+          }
+        first(requests).map(body => Some((range, body)))
+      case None => Some(None)
+    }
+
+  /*what a name stands for needs a query of the prover: wait for it off the message loop,
+    as completion does, and without it once the delay is over*/
+  def hover(id: LSP.Id, node_pos: Line.Node_Position): Unit =
+    rendering_offset(node_pos) match {
+      case Some((rendering, offset)) =>
+        hover_info_at(rendering, offset) match {
+          case Some(info) => channel.write(hover_reply(id, rendering, offset, info))
+          case None =>
+            val content = rendering.model.content
+            val deadline = Time.now() + hover_delay
+            Isabelle_Thread.fork(name = "hover", daemon = true) {
+              @tailrec def wait()
+                  : Option[(VSCode_Rendering, Text.Offset, Option[(Text.Range, XML.Body)])] =
+                rendering_offset(node_pos) match {
+                  case Some((rendering1, offset1)) if rendering1.model.content eq content =>
+                    hover_info_at(rendering1, offset1) match {
+                      case Some(info) => Some((rendering1, offset1, info))
+                      case None if Time.now() < deadline =>
+                        Time.seconds(0.05).sleep()
+                        wait()
+                      case None => Some((rendering1, offset1, None))
+                    }
+                  case _ => None
+                }
+              val reply =
+                try {
+                  wait() match {
+                    case Some((rendering1, offset1, info)) =>
+                      hover_reply(id, rendering1, offset1, info)
+                    case None => LSP.Hover.reply(id, None)
+                  }
+                }
+                catch { case exn: Throwable if !Exn.is_interrupt(exn) =>
+                  channel.log_error_message(Exn.message(exn))
+                  LSP.Hover.reply(id, None)
+                }
+              channel.write(reply)
+            }
+        }
+      case None => channel.write(LSP.Hover.reply(id, None))
+    }
 
 
   /* goto definition */
@@ -839,7 +928,9 @@ class Language_Server(
     def handle(json: JSON.T): Unit = {
       try {
         json match {
-          case LSP.Initialize(id) => init(id)
+          case LSP.Initialize(id, html) =>
+            html_hovers = html
+            init(id)
           case LSP.Initialized() =>
           case LSP.Shutdown(id) => shutdown(id)
           case LSP.Exit() => exit()
