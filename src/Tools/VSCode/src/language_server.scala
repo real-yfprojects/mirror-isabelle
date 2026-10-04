@@ -552,6 +552,26 @@ class Language_Server(
   }
 
 
+  /* references */
+
+  /*a search through the markup of every loaded node: off the message loop, which has to keep
+    receiving edits meanwhile*/
+  def references(id: LSP.Id, node_pos: Line.Node_Position, include_declaration: Boolean): Unit =
+    Isabelle_Thread.fork(name = "references", daemon = true) {
+      val result =
+        try {
+          (for ((rendering, offset) <- rendering_offset(node_pos))
+            yield VSCode_Entities.references(resources, rendering, offset, include_declaration))
+            .getOrElse(Nil)
+        }
+        catch { case exn: Throwable if !Exn.is_interrupt(exn) =>
+          channel.log_error_message(Exn.message(exn))
+          Nil
+        }
+      channel.write(LSP.References.reply(id, result))
+    }
+
+
   /* document highlights */
 
   def goto_command(id: Long, offset: Symbol.Offset): Unit =
@@ -695,6 +715,8 @@ class Language_Server(
           case LSP.Reset_Words() => reset_dictionary()
           case LSP.Hover(id, node_pos) => hover(id, node_pos)
           case LSP.GotoDefinition(id, node_pos) => goto_definition(id, node_pos)
+          case LSP.References(id, node_pos, include_declaration) =>
+            references(id, node_pos, include_declaration)
           case LSP.Goto_Command(id, offset) => goto_command(id, offset)
           case LSP.DocumentHighlights(id, node_pos) => document_highlights(id, node_pos)
           case LSP.CodeActionRequest(id, file, range) => code_action_request(id, file, range)

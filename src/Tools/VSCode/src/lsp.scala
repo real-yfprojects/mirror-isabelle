@@ -168,6 +168,7 @@ object LSP {
         ),
         "hoverProvider" -> true,
         "definitionProvider" -> true,
+        "referencesProvider" -> true,
         "documentHighlightProvider" -> true,
         "codeActionProvider" -> true,
         "documentOnTypeFormattingProvider" -> JSON.Object(
@@ -465,6 +466,26 @@ object LSP {
   /* goto definition request */
 
   object GotoDefinition extends RequestTextDocumentPosition("textDocument/definition") {
+    def reply(id: Id, result: List[Line.Node_Range]): JSON.T =
+      ResponseMessage(id, Some(result.map(Location.apply)))
+  }
+
+
+  /* references request */
+
+  object References {
+    def unapply(json: JSON.T): Option[(Id, Line.Node_Position, Boolean)] =
+      json match {
+        case RequestMessage(id, "textDocument/references", Some(params)) =>
+          for (node_pos <- TextDocumentPosition.unapply(params))
+          yield {
+            val include_declaration =
+              JSON.value(params, "context").flatMap(JSON.bool(_, "includeDeclaration"))
+            (id, node_pos, include_declaration.getOrElse(true))
+          }
+        case _ => None
+      }
+
     def reply(id: Id, result: List[Line.Node_Range]): JSON.T =
       ResponseMessage(id, Some(result.map(Location.apply)))
   }

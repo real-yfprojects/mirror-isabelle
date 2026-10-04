@@ -287,6 +287,7 @@ sources = \
   src/Tools/VSCode/src/preview_panel.scala \
   src/Tools/VSCode/src/state_panel.scala \
   src/Tools/VSCode/src/vscode_context_names.scala \
+  src/Tools/VSCode/src/vscode_entities.scala \
   src/Tools/VSCode/src/vscode_main.scala \
   src/Tools/VSCode/src/vscode_model.scala \
   src/Tools/VSCode/src/vscode_query.scala \
