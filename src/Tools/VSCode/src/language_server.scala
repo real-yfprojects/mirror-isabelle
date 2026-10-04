@@ -495,15 +495,24 @@ class Language_Server(
 
   /* completion */
 
+  /*where the latest completion was asked, by its number: the items that have details refer
+    to it, and the client asks for the details of the items of its current list only*/
+  private val completion_position = Synchronized((0L, Option.empty[Line.Node_Position]))
+
   /*semantic completion needs the prover's report on the word being typed: wait for it off
     the message loop, which has to keep receiving the edits that produce it*/
   def completion(id: LSP.Id, node_pos: Line.Node_Position): Unit = {
     val delay = completion_delay
+    val number =
+      completion_position.change_result({ case (n, _) => (n + 1, (n + 1, Some(node_pos))) })
     def pending(rendering: VSCode_Rendering, offset: Text.Offset): Boolean =
       rendering.completion_pending(offset, context_names)
     def complete(rendering: VSCode_Rendering, offset: Text.Offset)
-        : (List[LSP.CompletionItem], Boolean) =
-      rendering.completion(node_pos, offset, context_names)
+        : (List[LSP.CompletionItem], Boolean) = {
+      val (items, incomplete) = rendering.completion(node_pos, offset, context_names)
+      (items.map(item => item.copy(data = item.data.map(_ + ("completion" -> number)))),
+        incomplete)
+    }
 
     rendering_offset(node_pos) match {
       case Some((rendering, offset)) if !delay.is_zero && pending(rendering, offset) =>
@@ -536,6 +545,90 @@ class Language_Server(
             .getOrElse((Nil, false))
         channel.write(LSP.Completion.reply(id, result, incomplete))
     }
+  }
+
+
+  /* completion item details */
+
+  /*what the name of an item stands for, as a hover says it: the statement of a fact, the
+    type of a constant or a fixed variable -- on one line as the item's detail, and laid out
+    as its documentation when it takes more. The client asks as it shows an item: wait for
+    the prover off the message loop, as a hover does, and without it once the delay is over*/
+  def completion_resolve(id: LSP.Id, item: JSON.Object.T): Unit = {
+    val request =
+      for {
+        data <- JSON.value(item, "data")
+        number <- JSON.long(data, "completion")
+        key <- VSCode_Hover_Info.Key.from_json(data)
+        node_pos <-
+          completion_position.value match {
+            case (n, node_pos) if n == number => node_pos
+            case _ => None
+          }
+      } yield (node_pos, key)
+
+    /*None while the prover has yet to answer*/
+    def info(): Option[Option[(VSCode_Rendering, XML.Body)]] =
+      request match {
+        case Some((node_pos, key)) =>
+          rendering_offset(node_pos) match {
+            case Some((rendering, offset)) =>
+              rendering.completion_info_request(offset, key, context_names) match {
+                case Some(info_request) =>
+                  hover_info.get(rendering.snapshot, info_request).map(body =>
+                    if (body.isEmpty) None else Some((rendering, body)))
+                case None => Some(None)
+              }
+            case None => Some(None)
+          }
+        case None => Some(None)
+      }
+
+    def reply(res: Option[(VSCode_Rendering, XML.Body)]): JSON.T =
+      LSP.CompletionResolve.reply(id,
+        res match {
+          case Some((rendering, body)) => item ++ completion_details(rendering, body)
+          case None => item
+        })
+
+    info() match {
+      case Some(res) => channel.write(reply(res))
+      case None =>
+        val deadline = Time.now() + hover_delay
+        Isabelle_Thread.fork(name = "completion_resolve", daemon = true) {
+          @tailrec def wait(): Option[(VSCode_Rendering, XML.Body)] =
+            info() match {
+              case Some(res) => res
+              case None if Time.now() < deadline =>
+                Time.seconds(0.05).sleep()
+                wait()
+              case None => None
+            }
+          val res =
+            try { wait() }
+            catch { case exn: Throwable if !Exn.is_interrupt(exn) =>
+              channel.log_error_message(Exn.message(exn))
+              None
+            }
+          channel.write(reply(res))
+        }
+    }
+  }
+
+  private def completion_details(rendering: VSCode_Rendering, body: XML.Body): JSON.Object.T = {
+    /*the theorems of a fact are indented as the items of a list*/
+    val lines =
+      split_lines(resources.output_pretty(body, margin = 10000.0)).map(_.trim).filter(_.nonEmpty)
+    val detail =
+      lines.headOption.map(_ + (if (lines.length > 1) resources.output_text(" \\<dots>") else ""))
+    val documentation =
+      if (!resources.output_pretty_tooltip(body).contains('\n')) None
+      else if (html_hovers) {
+        Some(JSON.Object("kind" -> "markdown",
+          "value" -> resources.html_pretty_tooltip(body, rendering.hover_link)))
+      }
+      else Some(resources.output_pretty_tooltip(body))
+    JSON.optional("detail" -> detail) ++ JSON.optional("documentation" -> documentation)
   }
 
 
@@ -941,6 +1034,7 @@ class Language_Server(
             change_document(file, version, changes)
           case LSP.DidCloseTextDocument(file) => close_document(file)
           case LSP.Completion(id, node_pos) => completion(id, node_pos)
+          case LSP.CompletionResolve(id, item) => completion_resolve(id, item)
           case LSP.Include_Word() => update_dictionary(true, false)
           case LSP.Include_Word_Permanently() => update_dictionary(true, true)
           case LSP.Exclude_Word() => update_dictionary(false, false)

@@ -26,11 +26,37 @@ object VSCode_Hover_Info {
     selection of a fact: "2" for assms(2)*/
   sealed case class Key(kind: String, name: String, selection: String = "") {
     def args: List[String] = List(kind, name, selection)
+    def json: JSON.Object.T =
+      JSON.Object("kind" -> kind, "name" -> name, "selection" -> selection)
+  }
+
+  object Key {
+    def from_json(json: JSON.T): Option[Key] =
+      for {
+        kind <- JSON.string(json, "kind")
+        name <- JSON.string(json, "name")
+        selection <- JSON.string(json, "selection")
+      } yield Key(kind, name, selection)
   }
 
   /*the kinds the query knows about*/
   val kinds: Set[String] =
     Set(Markup.FACT, Markup.FIXED, Markup.CONSTANT, Markup.CASE, Markup.VAR)
+
+
+  /* completion: what an offered name stands for, as the details of its item */
+
+  private val completion_kinds = Set(Markup.FACT, Markup.FIXED, Markup.CONSTANT)
+
+  /*a name of the prover's report or of the context, as "kind.name"; a fact with all its
+    theorems ("1-"), which leaves out its name -- the item shows that already*/
+  def completion_key(item: Completion.Item): Option[Key] =
+    item.name.indexOf('.') match {
+      case i if i > 0 && completion_kinds(item.name.take(i)) =>
+        val kind = item.name.take(i)
+        Some(Key(kind, item.name.drop(i + 1), if (kind == Markup.FACT) "1-" else ""))
+      case _ => None
+    }
 
   /*the context to ask: the text after the command that binds a name, or before the command
     that refers to it -- whose own context may have closed the block of a local fact*/

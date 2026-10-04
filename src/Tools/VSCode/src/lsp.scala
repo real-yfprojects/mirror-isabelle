@@ -176,7 +176,7 @@ object LSP {
         /*no word characters: within a word, VS Code filters the list it has;
           "." separates words in VS Code but not in long names*/
         "completionProvider" -> JSON.Object(
-          "resolveProvider" -> false,
+          "resolveProvider" -> true,
           "triggerCharacters" ->
             ("\\" :: "." :: Symbol.symbols.entries.flatMap(_.abbrevs).flatMap(_.toList)
               .filterNot(Symbol.is_ascii_letdig).map(_.toString)).distinct
@@ -416,7 +416,8 @@ object LSP {
     text: Option[String] = None,
     snippet: Boolean = false,
     range: Option[Line.Range] = None,
-    command: Option[Command] = None
+    command: Option[Command] = None,
+    data: Option[JSON.Object.T] = None
   ) {
     def json: JSON.T =
       JSON.Object("label" -> label) ++
@@ -428,13 +429,27 @@ object LSP {
       (if (snippet) JSON.Object("insertTextFormat" -> 2) else JSON.Object.empty) ++
       JSON.optional("textEdit" -> range.map(TextEdit(_, text.getOrElse(label)).json)) ++
       JSON.optional("commitCharacters" -> commit_characters) ++
-      JSON.optional("command" -> command.map(_.json))
+      JSON.optional("command" -> command.map(_.json)) ++
+      JSON.optional("data" -> data)
   }
 
   object Completion extends RequestTextDocumentPosition("textDocument/completion") {
     def reply(id: Id, result: List[CompletionItem], incomplete: Boolean = false): JSON.T =
       ResponseMessage(id,
         Some(JSON.Object("isIncomplete" -> incomplete, "items" -> result.map(_.json))))
+  }
+
+  /*the details of the item that the client shows: the request carries the item as it was
+    sent, the reply is that item with them*/
+  object CompletionResolve {
+    def unapply(json: JSON.T): Option[(Id, JSON.Object.T)] =
+      json match {
+        case RequestMessage(id, "completionItem/resolve", Some(JSON.Object(item))) =>
+          Some((id, item))
+        case _ => None
+      }
+
+    def reply(id: Id, item: JSON.Object.T): JSON.T = ResponseMessage(id, Some(item))
   }
 
 
