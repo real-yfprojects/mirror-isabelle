@@ -5,7 +5,8 @@ resources = \
   lib/services/java.nio.charset.spi.CharsetProvider:META-INF/services/ \
   lib/logo/isabelle_transparent-32.gif:isabelle/ \
   lib/logo/isabelle_transparent.gif:isabelle/ \
-  src/Tools/VSCode/src/vscode_completion.ML:isabelle/vscode/
+  src/Tools/VSCode/src/vscode_completion.ML:isabelle/vscode/ \
+  src/Tools/VSCode/src/vscode_sledgehammer.ML:isabelle/vscode/
 sources = \
   src/HOL/SPARK/Tools/spark.scala \
   src/HOL/Tools/ATP/system_on_tptp.scala \

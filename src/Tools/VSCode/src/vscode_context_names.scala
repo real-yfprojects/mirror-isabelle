@@ -60,25 +60,9 @@ object VSCode_Context_Names {
 
   /* ML prelude: the query operation, as a resource of this module */
 
-  /*loaded into the prover at startup rather than compiled into Pure, so that it needs no
-    heap of its own: isabelle-vscode's extended server brings it to a released distribution
-    as part of a jar*/
-  private val ml_resource = "isabelle/vscode/vscode_completion.ML"
-
-  def prelude(log: Logger): Option[JFile] = {
-    val loader = getClass.getClassLoader
-    val stream = if (loader == null) null else loader.getResourceAsStream(ml_resource)
-    if (stream == null) {
-      log("No " + ml_resource + ": no completion of names within inner syntax")
-      None
-    }
-    else {
-      val text = using(stream)(s => new String(s.readAllBytes, UTF8.charset))
-      val file = Isabelle_System.tmp_file("vscode_completion", ext = "ML")
-      File.write(file, text)
-      Some(file)
-    }
-  }
+  def prelude(log: Logger): Option[JFile] =
+    Language_Server.ml_prelude("isabelle/vscode/vscode_completion.ML", "vscode_completion",
+      log, "no completion of names within inner syntax")
 
 
   /* matching */

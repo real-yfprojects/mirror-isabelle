@@ -63,6 +63,28 @@ object Language_Server {
   }
 
 
+  /* ML preludes */
+
+  /*ML of the server, loaded into the prover at startup rather than compiled into a heap, so
+    that it needs no heap of its own: isabelle-vscode's extended server brings it to a
+    released distribution as a resource of a jar. Returns a temporary file for
+    Isabelle_Process.start (use_prelude); missing says what is lost without it*/
+  def ml_prelude(resource: String, name: String, log: Logger, missing: String): Option[JFile] = {
+    val loader = getClass.getClassLoader
+    val stream = if (loader == null) null else loader.getResourceAsStream(resource)
+    if (stream == null) {
+      log("No " + resource + ": " + missing)
+      None
+    }
+    else {
+      val text = using(stream)(s => new String(s.readAllBytes, UTF8.charset))
+      val file = Isabelle_System.tmp_file(name, ext = "ML")
+      File.write(file, text)
+      Some(file)
+    }
+  }
+
+
   /* abstract editor operations */
 
   class Editor(server: Language_Server) extends isabelle.Editor {
@@ -402,11 +424,11 @@ class Language_Server(
       infoview.init()
       query.init()
 
-      val prelude = VSCode_Context_Names.prelude(log)
+      val prelude = List(VSCode_Context_Names.prelude(log), VSCode_Sledgehammer.prelude(log)).flatten
       try {
         Isabelle_Process.start(
           prover_options, session, session_background, session_heaps,
-          use_prelude = prelude.map(file => File.platform_path(File.path(file))).toList,
+          use_prelude = prelude.map(file => File.platform_path(File.path(file))),
           modes = modes).await_startup()
         reply_ok(
           "Welcome to Isabelle/" + session_background.session_name +

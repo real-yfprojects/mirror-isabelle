@@ -10,6 +10,17 @@ package isabelle.vscode
 
 import isabelle._
 
+import java.io.{File => JFile}
+
+
+object VSCode_Sledgehammer {
+  /* ML prelude: the query operation below the checking of the document */
+
+  def prelude(log: Logger): Option[JFile] =
+    Language_Server.ml_prelude("isabelle/vscode/vscode_sledgehammer.ML", "vscode_sledgehammer",
+      log, "while Sledgehammer runs, edits wait for its queued prover slices")
+}
+
 
 class VSCode_Sledgehammer(server: Language_Server) {
   private val query_operation =
