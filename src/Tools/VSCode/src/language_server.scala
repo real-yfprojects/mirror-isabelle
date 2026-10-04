@@ -572,6 +572,57 @@ class Language_Server(
     }
 
 
+  /* dependent theories */
+
+  /*reads every given file: off the message loop*/
+  def dependents(id: LSP.Id, node_pos: Line.Node_Position, files: List[JFile]): Unit =
+    Isabelle_Thread.fork(name = "dependents", daemon = true) {
+      val result =
+        try {
+          (for ((rendering, offset) <- rendering_offset(node_pos))
+            yield VSCode_Entities.dependents(resources, rendering, offset, files))
+            .getOrElse(VSCode_Entities.Dependents(Nil, Nil, Nil))
+        }
+        catch { case exn: Throwable if !Exn.is_interrupt(exn) =>
+          channel.log_error_message(Exn.message(exn))
+          VSCode_Entities.Dependents(Nil, Nil, Nil)
+        }
+      channel.write(LSP.Dependents_Request.reply(id, result.names, result.theories,
+        result.in_image))
+    }
+
+  /*load the theories that are not yet, as required, and tell how far the prover is with
+    each: asked again, until all are checked*/
+  def check_theories(id: LSP.Id, files: List[JFile]): Unit = {
+    if (resources.load_theories(session, editor, files, file_watcher)) {
+      start_loading()
+      editor.invoke()
+    }
+    val snapshot = session.snapshot()
+    val now = Date.now()
+    val result =
+      for (file <- files) yield {
+        val (status, percentage) =
+          resources.get_model(file) match {
+            case None => ("failed", 0)
+            case Some(model) =>
+              val name = model.node_name
+              val node = snapshot.version.nodes(name)
+              if (node.header.errors.nonEmpty) ("failed", 0)
+              else if (node.commands.isEmpty) ("pending", 0)
+              else {
+                val st =
+                  Document_Status.Node_Status.make(now, snapshot.state, snapshot.version, name)
+                if (st.consolidated) (if (st.ok) "checked" else "failed", 100)
+                else ("pending", st.percentage)
+              }
+          }
+        LSP.Check_Theories.theory(file, status, percentage)
+      }
+    channel.write(LSP.Check_Theories.reply(id, result))
+  }
+
+
   /* document highlights */
 
   def goto_command(id: Long, offset: Symbol.Offset): Unit =
@@ -717,6 +768,8 @@ class Language_Server(
           case LSP.GotoDefinition(id, node_pos) => goto_definition(id, node_pos)
           case LSP.References(id, node_pos, include_declaration) =>
             references(id, node_pos, include_declaration)
+          case LSP.Dependents_Request(id, node_pos, files) => dependents(id, node_pos, files)
+          case LSP.Check_Theories(id, files) => check_theories(id, files)
           case LSP.Goto_Command(id, offset) => goto_command(id, offset)
           case LSP.DocumentHighlights(id, node_pos) => document_highlights(id, node_pos)
           case LSP.CodeActionRequest(id, file, range) => code_action_request(id, file, range)

@@ -11,12 +11,19 @@ serial. The other is where the name is bound: every reference carries that posit
 definition is at it. That also unites entities bound by the very same name, like a constant
 and, for the equations of its definition, the fixed variable of its specification. Entities
 that the session image defines are bound in no loaded node, only in a source file.
+
+So a theory that nobody has checked has no occurrences yet. The dependents of an entity are
+the theories that may have some: those that import where it is bound and spell its name.
 */
 
 package isabelle.vscode
 
 
 import isabelle._
+
+import java.io.{File => JFile}
+
+import scala.annotation.tailrec
 
 
 object VSCode_Entities {
@@ -147,5 +154,98 @@ object VSCode_Entities {
 
     (external_defs ::: occs.filter(occ => include_declaration || !occ.is_def).map(_.node_range))
       .distinct
+  }
+
+
+  /* dependents: unloaded theories that may refer to these entities */
+
+  sealed case class Dependents(
+    names: List[String],
+    theories: List[JFile],
+    in_image: List[JFile]
+  )
+
+  /*the theory where an entity is bound, if it is in a loaded node*/
+  private def binding_theory(rendering: VSCode_Rendering, occ: Occurrence): Option[String] = {
+    val snapshot = rendering.snapshot
+    if (occ.is_def) {
+      snapshot.commands_loading.headOption.map(_.node_name.theory) orElse
+        Some(snapshot.node_name.theory)
+    }
+    else {
+      for {
+        id <- Position.Def_Id.unapply(occ.markup.properties)
+        (_, command) <- snapshot.find_command(id)
+      } yield command.node_name.theory
+    }
+  }
+
+  private def is_name_char(c: Char): Boolean =
+    Symbol.is_ascii_letdig(c) || c == '_' || c == '\''
+
+  /*a name as a word of its own (also qualified): over-approximated, as it is only a filter*/
+  def mentions(text: String, name: String): Boolean = {
+    def boundary(i: Int): Boolean = i < 0 || i >= text.length || !is_name_char(text(i))
+    @tailrec def from(i: Int): Boolean = {
+      val j = text.indexOf(name, i)
+      j >= 0 && ((boundary(j - 1) && boundary(j + name.length)) || from(j + 1))
+    }
+    name.nonEmpty && from(0)
+  }
+
+  /*Of the given theory files, those that no loaded node has: the ones that import (perhaps
+    indirectly) where the entities are bound and mention one of their names. An entity of
+    the session image is imported by all of them. Files of theories in the image are not
+    checked again, only listed. A theory that uses an entity by notation only, never by its
+    name, is not found.*/
+  def dependents(
+    resources: VSCode_Resources,
+    rendering: VSCode_Rendering,
+    offset: Text.Offset,
+    files: List[JFile]
+  ): Dependents = {
+    val focus_occs = focus(rendering, offset)
+    val names = focus_occs.map(occ => base_name(occ.markup)).distinct
+    val targets = focus_occs.map(binding_theory(rendering, _))
+    val restrict = if (targets.forall(_.isDefined)) Some(targets.flatten.toSet) else None
+
+    lazy val unloaded =
+      for {
+        file <- files.distinct
+        if resources.get_model(file).isEmpty
+        name = resources.node_name(file)
+        if name.is_theory
+        text <- resources.read_file_content(name)
+      } yield (file, name, text)
+    lazy val (in_image, outside) = unloaded.partition(u => resources.loaded_theory(u._2))
+    def mentioning(us: List[(JFile, Document.Node.Name, String)]) =
+      us.filter(u => names.exists(mentions(u._3, _)))
+
+    /*imports by theory: of the loaded nodes as the prover has them, of the other files by
+      their headers; a theory of the session image imports no project theory*/
+    lazy val imports: Map[String, List[String]] =
+      (rendering.snapshot.version.nodes.iterator.map({ case (name, node) =>
+        name.theory -> node.header.imports.map(_.theory) }) ++
+      outside.iterator.map({ case (_, name, text) =>
+        name.theory -> resources.check_thy(name, Scan.char_reader(text)).imports.map(_.theory)
+      })).toMap
+
+    def reaches(theory: String, targets: Set[String]): Boolean = {
+      @tailrec def search(seen: Set[String], todo: List[String]): Boolean =
+        todo match {
+          case Nil => false
+          case t :: _ if targets(t) => true
+          case t :: ts if seen(t) => search(seen, ts)
+          case t :: ts => search(seen + t, imports.getOrElse(t, Nil) ::: ts)
+        }
+      search(Set.empty, imports.getOrElse(theory, Nil))
+    }
+
+    if (names.isEmpty) Dependents(Nil, Nil, Nil)
+    else {
+      val theories =
+        mentioning(outside).filter(u => restrict.forall(reaches(u._2.theory, _))).map(_._1)
+      Dependents(names, theories, mentioning(in_image).map(_._1))
+    }
   }
 }

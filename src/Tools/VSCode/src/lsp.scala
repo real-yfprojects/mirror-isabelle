@@ -491,6 +491,47 @@ object LSP {
   }
 
 
+  /* dependent theories: unloaded ones that may refer to an entity, and checking them */
+
+  private def files_param(params: JSON.T): Option[List[JFile]] =
+    JSON.strings(params, "files").map(_.filter(Url.is_wellformed_file).map(Url.absolute_file))
+
+  object Dependents_Request {
+    def unapply(json: JSON.T): Option[(Id, Line.Node_Position, List[JFile])] =
+      json match {
+        case RequestMessage(id, "PIDE/dependents", Some(params)) =>
+          for {
+            node_pos <- TextDocumentPosition.unapply(params)
+            files <- files_param(params)
+          } yield (id, node_pos, files)
+        case _ => None
+      }
+
+    def reply(id: Id, names: List[String], theories: List[JFile], in_image: List[JFile])
+        : JSON.T =
+      ResponseMessage(id, Some(
+        JSON.Object(
+          "names" -> names,
+          "theories" -> theories.map(Url.print_file),
+          "in_image" -> in_image.map(Url.print_file))))
+  }
+
+  object Check_Theories {
+    def unapply(json: JSON.T): Option[(Id, List[JFile])] =
+      json match {
+        case RequestMessage(id, "PIDE/check_theories", Some(params)) =>
+          files_param(params).map((id, _))
+        case _ => None
+      }
+
+    def theory(file: JFile, status: String, percentage: Int): JSON.T =
+      JSON.Object("uri" -> Url.print_file(file), "status" -> status, "percentage" -> percentage)
+
+    def reply(id: Id, theories: List[JSON.T]): JSON.T =
+      ResponseMessage(id, Some(JSON.Object("theories" -> theories)))
+  }
+
+
   object Goto_Command {
     def apply(id: Long, offset: Symbol.Offset): JSON.T =
       Notification("PIDE/goto_command", JSON.Object("id" -> id, "offset" -> offset))

@@ -270,6 +270,35 @@ extends Resources(session_background, log = log) {
   }
 
 
+  /* load theories: required, like those ticked in the Theories panel of Isabelle/jEdit, so
+     that the prover checks them although no open theory imports them */
+
+  def load_theories(
+    session: VSCode_Session,
+    editor: Language_Server.Editor,
+    files: List[JFile],
+    file_watcher: File_Watcher
+  ): Boolean = {
+    state.change_result { st =>
+      val loaded_models =
+        (for {
+          file <- files.iterator
+          if !st.models.isDefinedAt(file)
+          name = node_name(file)
+          if name.is_theory && !loaded_theory(name)
+          text <- { file_watcher.register_parent(file); read_file_content(name) }
+        }
+        yield {
+          val model = VSCode_Model.init(session, editor, name)
+          val model1 = (model.change_text(text) getOrElse model).external(true)
+          (file, model1.copy(node_required = true))
+        }).toList
+
+      (loaded_models.nonEmpty, st.update_models(loaded_models))
+    }
+  }
+
+
   /* pending input */
 
   def flush_input(session: VSCode_Session, channel: Channel): Unit = {
