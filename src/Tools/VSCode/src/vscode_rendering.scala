@@ -399,6 +399,7 @@ extends Rendering(snapshot, model.session.resources.options, model.session) {
               kinds(syntax_completion, VSCode_Rendering.syntax_kind) :::
               kinds(spell_completion, _ => LSP.CompletionItemKind.Text) :::
               kinds(path_completion, VSCode_Rendering.path_kind)).toMap
+          val semantic_items = semantic_completion.toList.flatMap(_.items).toSet
 
           val items =
             Completion.Result.merge(history,
@@ -429,7 +430,12 @@ extends Rendering(snapshot, model.session.resources.options, model.session) {
                       else None,
                     text = Some(text),
                     snippet = snippet,
-                    range = Some(doc.range(item.range)))
+                    range = Some(doc.range(item.range)),
+                    data =
+                      if (semantic_items(item)) {
+                        VSCode_Hover_Info.completion_key(item).map(_.json)
+                      }
+                      else None)
                 })
             }
           val all_items =
@@ -672,6 +678,16 @@ extends Rendering(snapshot, model.session.resources.options, model.session) {
       case Some(command1) if !command1.is_proper => proper_after(command1)
       case res => res
     }
+
+  /*what a name that completion offers at an offset stands for is asked of the context
+    the names come from, which is before the command being written*/
+  def completion_info_request(
+    offset: Text.Offset,
+    key: VSCode_Hover_Info.Key,
+    context_names: VSCode_Context_Names
+  ): Option[VSCode_Hover_Info.Request] =
+    context_names.context_command(snapshot, offset).map(command =>
+      VSCode_Hover_Info.Request(command, command_exec(command), key))
 
   /*the name at an offset that the hover info query knows about, with the contexts to ask,
     the first one that knows it answers: a fact that a command refers to is in the context

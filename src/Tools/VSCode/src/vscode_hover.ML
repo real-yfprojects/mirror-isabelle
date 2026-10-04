@@ -64,10 +64,17 @@ fun fact_info ctxt name sel =
       | _ => NONE)
   | NONE => NONE);
 
+(*by its internal name, as the markup of the text has it, or by the name it is written as,
+  as completion offers it: within a proof body, x is fixed as x__*)
 fun fixed_info ctxt x =
-  (case Variable.default_type ctxt x of
-    SOME T => SOME (pretty_typing ctxt (Free (x, T)) T)
-  | NONE => NONE);
+  let
+    fun typing x' =
+      Option.map (fn T => pretty_typing ctxt (Free (x', T)) T) (Variable.default_type ctxt x');
+  in
+    (case typing x of
+      NONE => Option.mapPartial typing (Variable.lookup_fixed ctxt x)
+    | res => res)
+  end;
 
 (*a declared type is schematic, 'a as ?'a: printed as it is written*)
 fun unvarifyT T = the_default T (try Logic.unvarifyT_global T);
