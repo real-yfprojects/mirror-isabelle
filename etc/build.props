@@ -6,7 +6,8 @@ resources = \
   lib/logo/isabelle_transparent-32.gif:isabelle/ \
   lib/logo/isabelle_transparent.gif:isabelle/ \
   src/Tools/VSCode/src/vscode_completion.ML:isabelle/vscode/ \
-  src/Tools/VSCode/src/vscode_sledgehammer.ML:isabelle/vscode/
+  src/Tools/VSCode/src/vscode_sledgehammer.ML:isabelle/vscode/ \
+  src/Tools/VSCode/src/vscode_skeletons.ML:isabelle/vscode/
 sources = \
   src/HOL/SPARK/Tools/spark.scala \
   src/HOL/Tools/ATP/system_on_tptp.scala \
@@ -300,6 +301,7 @@ sources = \
   src/Tools/VSCode/src/vscode_indent.scala \
   src/Tools/VSCode/src/vscode_infoview.scala \
   src/Tools/VSCode/src/vscode_simplifier_trace.scala \
+  src/Tools/VSCode/src/vscode_skeletons.scala \
   src/Tools/VSCode/src/vscode_spell_checker.scala \
   src/Tools/VSCode/src/vscode_theories.scala \
   src/Tools/jEdit/src/active.scala \

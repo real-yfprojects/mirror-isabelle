@@ -601,9 +601,27 @@ object LSP {
 
   /* code actions */
 
-  sealed case class CodeAction(title: String, edits: List[TextDocumentEdit]) {
+  sealed case class CodeAction(
+    title: String,
+    edits: List[TextDocumentEdit],
+    kind: Option[String] = None,
+    is_preferred: Boolean = false
+  ) {
     def json: JSON.T =
-      JSON.Object("title" -> title, "edit" -> WorkspaceEdit(edits))
+      JSON.Object("title" -> title, "edit" -> WorkspaceEdit(edits)) ++
+      JSON.optional("kind" -> kind) ++
+      (if (is_preferred) JSON.Object("isPreferred" -> true) else JSON.Object.empty)
+  }
+
+  object CodeActionKind {
+    /*Isabelle's own outline of a proof method's cases: "Proof outline with cases"*/
+    val outline = "refactor.rewrite.isabelle.outline"
+    /*a proof found by try0, Sledgehammer etc.*/
+    val proof = "quickfix.isabelle.proof"
+    /*a skeleton determined by the text already written*/
+    val skeleton = "refactor.rewrite.isabelle.skeleton"
+    /*one possible skeleton among others*/
+    val suggestion = "refactor.rewrite.isabelle.suggestion"
   }
 
   object CodeActionRequest {

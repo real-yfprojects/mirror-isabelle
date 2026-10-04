@@ -228,6 +228,7 @@ class Language_Server(
     options.int.update("completion_limit", completion_limit)
 
   private val context_names = new VSCode_Context_Names(server, completion_limit)
+  private val skeletons = new VSCode_Skeletons(server)
 
   def rendering_offset(node_pos: Line.Node_Position): Option[(VSCode_Rendering, Text.Offset)] =
     for {
@@ -424,7 +425,8 @@ class Language_Server(
       infoview.init()
       query.init()
 
-      val prelude = List(VSCode_Context_Names.prelude(log), VSCode_Sledgehammer.prelude(log)).flatten
+      val prelude = List(VSCode_Context_Names.prelude(log), VSCode_Sledgehammer.prelude(log),
+        VSCode_Skeletons.prelude(log)).flatten
       try {
         Isabelle_Process.start(
           prover_options, session, session_background, session_heaps,
@@ -464,6 +466,7 @@ class Language_Server(
         infoview.exit()
         query.exit()
         context_names.exit()
+        skeletons.exit()
 
         val result = session.stop()
         ((if (result.ok) "" else "Prover shutdown failed: " + result.rc), None)
@@ -667,18 +670,26 @@ class Language_Server(
 
   /* code actions */
 
-  def code_action_request(id: LSP.Id, file: JFile, range: Line.Range): Unit = {
+  /*the sendbacks of the results around a range, and the skeletons of the commands there --
+    and whether some of those are yet to come from the prover*/
+  private def code_actions(file: JFile, range: Line.Range)
+      : Option[(List[LSP.CodeAction], Boolean)] =
     for {
       model <- resources.get_model(file)
       version <- model.version
       doc = model.content.doc
       text_range <- doc.text_range(range)
-    } {
+    } yield {
       val snapshot = resources.snapshot(model)
-      val results =
-        snapshot.command_results(Text.Range(text_range.start - 1, text_range.stop + 1))
-          .iterator.map(_._2).toList
-      val actions =
+      val around = Text.Range(text_range.start - 1, text_range.stop + 1)
+      def edit(range: Line.Range, text: String): List[LSP.TextDocumentEdit] =
+        List(LSP.TextDocumentEdit(file, Some(version),
+          List(LSP.TextEdit(range, resources.output_edit(text)))))
+      def indent_of(offset: Text.Offset): String =
+        doc.lines(doc.position(offset).line).text.takeWhile(_.isWhitespace)
+
+      val results = snapshot.command_results(around).iterator.map(_._2).toList
+      val sendbacks =
         List.from(
           for {
             (snippet, props) <- Protocol.sendback_snippets(results).iterator
@@ -688,20 +699,78 @@ class Language_Server(
             range = command.core_range + start
             current_text <- model.get_text(range)
           } yield {
-            val line_range = doc.range(range)
             val edit_text =
               if (props.contains(Markup.PADDING_COMMAND)) {
-                val whole_line = doc.lines(line_range.start.line)
-                val indent = whole_line.text.takeWhile(_.isWhitespace)
-                current_text + "\n" + Library.prefix_lines(indent, snippet)
+                current_text + "\n" + Library.prefix_lines(indent_of(range.start), snippet)
               }
               else current_text + snippet
-            val edit = LSP.TextEdit(line_range, resources.output_edit(edit_text))
-            LSP.CodeAction(snippet, List(LSP.TextDocumentEdit(file, Some(version), List(edit))))
+            val (title, kind) = VSCode_Skeletons.sendback_title(snippet)
+            LSP.CodeAction(title, edit(doc.range(range), edit_text), kind = Some(kind))
           })
-      channel.write(LSP.CodeActionRequest.reply(id, actions))
+      /*the first proof found is the best one that try0 or Sledgehammer offers*/
+      val first_proof = sendbacks.indexWhere(_.kind.contains(LSP.CodeActionKind.proof))
+      val sendbacks1 =
+        sendbacks.zipWithIndex.map({ case (action, i) =>
+          if (i == first_proof) action.copy(is_preferred = true) else action })
+
+      if (snapshot.is_outdated) (sendbacks1, true)
+      else {
+        val keywords = model.syntax().keywords
+        val node = snapshot.node
+        def end_of(command: Command): Option[Text.Offset] =
+          node.command_start(command).map(_ + command.core_range.stop)
+        val asked =
+          for {
+            (command, start) <- node.command_iterator(around).toList
+            if command.is_proper
+            target <- VSCode_Skeletons.target(keywords, command)
+            placeholder <- VSCode_Skeletons.placement(keywords, node, command, target)
+            stop = start + command.core_range.stop
+            replaced <- placeholder match {
+              case None => Some(Text.Range(stop, stop))
+              case Some(next) => end_of(next).map(Text.Range(stop, _))
+            }
+          } yield (stop, replaced, skeletons.get(snapshot, command))
+        val skeleton_actions =
+          for {
+            case (stop, replaced, Some(list)) <- asked
+            skeleton <- list
+          } yield {
+            val text = "\n" + Library.prefix_lines(indent_of(stop), skeleton.text)
+            LSP.CodeAction(skeleton.title, edit(doc.range(replaced), text),
+              kind = Some(skeleton.code_action_kind))
+          }
+        (sendbacks1 ::: skeleton_actions, asked.exists(_._3.isEmpty))
+      }
     }
-  }
+
+  /*skeletons need the prover: wait for them off the message loop, as for completion*/
+  def code_action_request(id: LSP.Id, file: JFile, range: Line.Range): Unit =
+    code_actions(file, range) match {
+      case Some((actions, true)) if !completion_delay.is_zero =>
+        val deadline = Time.now() + completion_delay
+        Isabelle_Thread.fork(name = "code_actions", daemon = true) {
+          @tailrec def wait(last: List[LSP.CodeAction]): List[LSP.CodeAction] =
+            if (Time.now() >= deadline) last
+            else {
+              Time.seconds(0.05).sleep()
+              code_actions(file, range) match {
+                case Some((actions1, true)) => wait(actions1)
+                case Some((actions1, false)) => actions1
+                case None => last
+              }
+            }
+          val result =
+            try { wait(actions) }
+            catch { case exn: Throwable if !Exn.is_interrupt(exn) =>
+              channel.log_error_message(Exn.message(exn))
+              actions
+            }
+          channel.write(LSP.CodeActionRequest.reply(id, result))
+        }
+      case res =>
+        channel.write(LSP.CodeActionRequest.reply(id, res.map(_._1).getOrElse(Nil)))
+    }
 
 
   /* indentation */

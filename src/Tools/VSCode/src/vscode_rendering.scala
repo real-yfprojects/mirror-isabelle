@@ -81,6 +81,19 @@ object VSCode_Rendering {
       case _ => LSP.CompletionItemKind.File
     }
 
+  /*a theory block ("instantiation\nbegin\n\nend", Outer_Syntax): the caret right after the
+    keyword, where the name or arity goes before the body can be written -- except for the
+    blocks that take none*/
+  private val block_template = "\nbegin\n\nend"
+  private val unnamed_blocks = Set("notepad", "experiment")
+
+  def template_move(replacement: String, move: Int): Int = {
+    val keyword = replacement.stripSuffix(block_template)
+    if (move != 0 && keyword.length < replacement.length && keyword.nonEmpty &&
+        !unnamed_blocks(keyword)) keyword.length - replacement.length
+    else move
+  }
+
   private def snippet_escape(s: String): String =
     s.replace("\\", "\\\\").replace("$", "\\$").replace("}", "\\}")
 
@@ -399,11 +412,12 @@ extends Rendering(snapshot, model.session.resources.options, model.session) {
               case None => Nil
               case Some(result) =>
                 result.items.map(item => {
+                  val move = VSCode_Rendering.template_move(item.replacement, item.move)
                   val (text, snippet) =
-                    if (item.move == 0) (item.replacement, false)
+                    if (move == 0) (item.replacement, false)
                     else {
                       val (s1, s2) =
-                        item.replacement.splitAt(item.replacement.length + item.move)
+                        item.replacement.splitAt(item.replacement.length + move)
                       (VSCode_Rendering.snippet_escape(s1) + "$0" +
                         VSCode_Rendering.snippet_escape(s2), true)
                     }
