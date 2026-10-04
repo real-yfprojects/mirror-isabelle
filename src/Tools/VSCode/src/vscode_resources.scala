@@ -348,6 +348,33 @@ extends Resources(session_background, log = log) {
   def output_pretty_tooltip(body: XML.Body): String = output_pretty(body, tooltip_margin)
   def output_pretty_message(body: XML.Body): String = output_pretty(body, message_margin)
 
+  /*a tooltip for a hover in Markdown that may contain HTML: laid out like the plain text, in
+    a <pre> block, with each name that has a definition linked to it*/
+  def html_pretty_tooltip(body: XML.Body, link: Properties.T => Option[String]): String = {
+    def escape(s: String): String =
+      s.flatMap {
+        case '&' => "&amp;"
+        case '<' => "&lt;"
+        case '>' => "&gt;"
+        case '"' => "&quot;"
+        case c => c.toString
+      }
+    def html(tree: XML.Tree): String =
+      tree match {
+        case XML.Wrapped_Elem(_, _, body) => body.map(html).mkString
+        case XML.Elem(Markup(Markup.ENTITY, props), body) =>
+          val text = body.map(html).mkString
+          link(props) match {
+            case Some(href) => "<a href=\"" + escape(href) + "\">" + text + "</a>"
+            case None => text
+          }
+        case XML.Elem(_, body) => body.map(html).mkString
+        case XML.Text(text) => escape(output_text(text))
+      }
+    val formatted = Pretty.formatted(body, margin = tooltip_margin, metric = Symbol.Metric)
+    "<pre><code>" + formatted.map(html).mkString + "</code></pre>"
+  }
+
 
   /* caret handling */
 

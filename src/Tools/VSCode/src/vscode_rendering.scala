@@ -190,6 +190,14 @@ object VSCode_Rendering {
   private val hyperlink_elements =
     Markup.Elements(Markup.ENTITY, Markup.PATH, Markup.POSITION)
 
+  private val hover_info_elements = Markup.Elements(Markup.ENTITY, Markup.VAR)
+
+  /*of the names on one range, the one a hover tells about: a case before the facts that
+    are named like it, a fixed variable before what it is a skolem of*/
+  private val hover_info_rank: Map[String, Int] =
+    Map(Markup.CASE -> 0, Markup.VAR -> 1, Markup.FIXED -> 2, Markup.CONSTANT -> 3,
+      Markup.FACT -> 4)
+
   private val indentation_elements =
     Markup.Elements(Markup.Command_Indent.name)
 }
@@ -625,6 +633,89 @@ extends Rendering(snapshot, model.session.resources.options, model.session) {
       case Position.Item_Def_Id(id, range) => hyperlink_command(id, range)
       case _ => None
     }
+
+  /*a link to where an entity is defined, for a hover in Markdown: a file URI whose
+    fragment VS Code reads as the line and column to open it at*/
+  def hover_link(props: Properties.T): Option[String] =
+    hyperlink_def_position(props).map(loc =>
+      Url.print_file_name(loc.name) + "#L" + (loc.range.start.line + 1) + "," +
+        (loc.range.start.column + 1))
+
+
+  /* hover info */
+
+  private val Fact_Selection = """\(([0-9]+(?:-[0-9]*)?(?:,[0-9]+(?:-[0-9]*)?)*)\)""".r
+
+  /*the selection after the name of a fact, "2" of assms(2)*/
+  private def fact_selection(stop: Text.Offset): String = {
+    val text = model.content.text
+    if (stop < text.length && text(stop) == '(') {
+      Fact_Selection.findPrefixMatchOf(text.substring(stop, (stop + 64) min text.length)) match {
+        case Some(m) => m.group(1)
+        case None => ""
+      }
+    }
+    else ""
+  }
+
+  /*the first execution of a command: another one means that its context may differ*/
+  private def command_exec(command: Command): Option[Document_ID.Exec] =
+    for {
+      assignment <- snapshot.state.assignments.get(snapshot.version.id)
+      execs <- assignment.command_execs.get(command.id)
+      exec <- execs.headOption
+    } yield exec
+
+  /*the next command with a context of its own*/
+  @tailrec private def proper_after(command: Command): Option[Command] =
+    snapshot.node.commands.next(command) match {
+      case Some(command1) if !command1.is_proper => proper_after(command1)
+      case res => res
+    }
+
+  /*the name at an offset that the hover info query knows about, with the contexts to ask,
+    the first one that knows it answers: a fact that a command refers to is in the context
+    before it, as that command may close the block of a local fact; everything else is in
+    the context after its command -- or, for a name that a command binds by proving
+    something (obtain, have h:), after the next one, which ends a proof by a single method;
+    a later context is asked only when an earlier one has nothing*/
+  def hover_request(offset: Text.Offset, context_names: VSCode_Context_Names)
+      : Option[(Text.Range, List[VSCode_Hover_Info.Request])] = {
+    if (snapshot.is_outdated) None
+    else {
+      val keys =
+        snapshot.cumulate[List[(Text.Range, VSCode_Hover_Info.Key, Boolean)]](
+          Text.Range(offset, offset + 1), Nil, VSCode_Rendering.hover_info_elements, _ =>
+            {
+              case (keys, Text.Info(r0, XML.Elem(markup @ Markup.Entity(kind, name), _)))
+              if VSCode_Hover_Info.kinds(kind) && name.nonEmpty =>
+                val is_def = Markup.Entity.Def.unapply(markup).isDefined
+                Some((snapshot.convert(r0), VSCode_Hover_Info.Key(kind, name), is_def) :: keys)
+              case (keys, Text.Info(r0, XML.Elem(Markup(Markup.VAR, Markup.Name(name)), _))) =>
+                Some((snapshot.convert(r0), VSCode_Hover_Info.Key(Markup.VAR, name), false) :: keys)
+              case _ => None
+            }).flatMap(_.info)
+
+      keys.sortBy({ case (r, key, _) =>
+        (r.length, VSCode_Rendering.hover_info_rank.getOrElse(key.kind, 9)) }).headOption
+      .flatMap({ case (range, key0, is_def) =>
+        val ref_fact = key0.kind == Markup.FACT && !is_def
+        val key = if (ref_fact) key0.copy(selection = fact_selection(range.stop)) else key0
+        val contexts =
+          if (ref_fact) context_names.context_command(snapshot, offset).toList
+          else {
+            snapshot.node.command_iterator(snapshot.revert(offset)).nextOption().toList
+              .flatMap({ case (command, _) =>
+                command :: proper_after(command).toList })
+          }
+        if (contexts.isEmpty) None
+        else {
+          Some((range, contexts.map(command =>
+            VSCode_Hover_Info.Request(command, command_exec(command), key))))
+        }
+      })
+    }
+  }
 
   def hyperlinks(range: Text.Range): List[Line.Node_Range] =
     snapshot.cumulate[List[Line.Node_Range]](

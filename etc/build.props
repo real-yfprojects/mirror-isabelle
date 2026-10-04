@@ -5,7 +5,8 @@ resources = \
   lib/services/java.nio.charset.spi.CharsetProvider:META-INF/services/ \
   lib/logo/isabelle_transparent-32.gif:isabelle/ \
   lib/logo/isabelle_transparent.gif:isabelle/ \
-  src/Tools/VSCode/src/vscode_completion.ML:isabelle/vscode/
+  src/Tools/VSCode/src/vscode_completion.ML:isabelle/vscode/ \
+  src/Tools/VSCode/src/vscode_hover.ML:isabelle/vscode/
 sources = \
   src/HOL/SPARK/Tools/spark.scala \
   src/HOL/Tools/ATP/system_on_tptp.scala \
@@ -287,6 +288,7 @@ sources = \
   src/Tools/VSCode/src/preview_panel.scala \
   src/Tools/VSCode/src/state_panel.scala \
   src/Tools/VSCode/src/vscode_context_names.scala \
+  src/Tools/VSCode/src/vscode_hover_info.scala \
   src/Tools/VSCode/src/vscode_main.scala \
   src/Tools/VSCode/src/vscode_model.scala \
   src/Tools/VSCode/src/vscode_query.scala \
