@@ -232,6 +232,8 @@ class Language_Server(
 
   private val hover_info = new VSCode_Hover_Info(server)
 
+  private val agent = new VSCode_Agent(server)
+
   /*how long a hover waits for the prover to say what a name stands for*/
   private def hover_delay: Time =
     if (options.defined("vscode_hover_delay")) options.seconds("vscode_hover_delay")
@@ -436,7 +438,8 @@ class Language_Server(
       query.init()
 
       val prelude = List(VSCode_Context_Names.prelude(log), VSCode_Sledgehammer.prelude(log),
-        VSCode_Skeletons.prelude(log), VSCode_Hover_Info.prelude(log)).flatten
+        VSCode_Skeletons.prelude(log), VSCode_Hover_Info.prelude(log),
+        VSCode_Agent.prelude(log)).flatten
       try {
         Isabelle_Process.start(
           prover_options, session, session_background, session_heaps,
@@ -830,6 +833,21 @@ class Language_Server(
   }
 
 
+  /* AI agents */
+
+  /*answered in any case, and off the message loop: a query waits for the prover*/
+  private def agent_reply(id: LSP.Id, name: String)(result: => JSON.T): Unit =
+    Isabelle_Thread.fork(name = name, daemon = true) {
+      val json =
+        try { result }
+        catch { case exn: Throwable if !Exn.is_interrupt(exn) =>
+          channel.log_error_message(Exn.message(exn))
+          JSON.Object("error" -> Exn.message(exn))
+        }
+      channel.write(LSP.Agent_Reply(id, json))
+    }
+
+
   /* document highlights */
 
   def goto_command(id: Long, offset: Symbol.Offset): Unit =
@@ -1046,6 +1064,19 @@ class Language_Server(
             references(id, node_pos, include_declaration)
           case LSP.Dependents_Request(id, node_pos, files) => dependents(id, node_pos, files)
           case LSP.Check_Theories(id, files) => check_theories(id, files)
+          case LSP.Agent_Report(id, file) => agent_reply(id, "agent_report")(agent.report(file))
+          case LSP.Agent_State(id, node_pos) =>
+            agent_reply(id, "agent_state")(agent.state(node_pos))
+          case LSP.Agent_Try(id, p) =>
+            agent_reply(id, "agent_try") {
+              agent.try_candidates(p.node_pos, p.goal, p.candidates, p.timeout_ms, p.stats,
+                p.watch_rules, p.watch_patterns, p.watch_limit,
+                Time.now() + Time.ms(p.deadline_ms))
+            }
+          case LSP.Agent_Sledgehammer(id, node_pos, goal, timeout_s, deadline_ms) =>
+            agent_reply(id, "agent_sledgehammer") {
+              agent.sledgehammer(node_pos, goal, timeout_s, Time.now() + Time.ms(deadline_ms))
+            }
           case LSP.Goto_Command(id, offset) => goto_command(id, offset)
           case LSP.DocumentHighlights(id, node_pos) => document_highlights(id, node_pos)
           case LSP.CodeActionRequest(id, file, range) => code_action_request(id, file, range)

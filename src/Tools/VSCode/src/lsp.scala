@@ -189,7 +189,9 @@ object LSP {
         "documentOnTypeFormattingProvider" -> JSON.Object(
           "firstTriggerCharacter" -> "\n",
           "moreTriggerCharacter" -> List(" ")),
-        "documentRangeFormattingProvider" -> true)
+        "documentRangeFormattingProvider" -> true,
+        /*the PIDE/agent_* requests: a server that does not know a request never answers it*/
+        "experimental" -> JSON.Object("isabelleAgent" -> 1))
   }
 
   object Initialized extends Notification0("initialized")
@@ -571,6 +573,72 @@ object LSP {
 
     def reply(id: Id, theories: List[JSON.T]): JSON.T =
       ResponseMessage(id, Some(JSON.Object("theories" -> theories)))
+  }
+
+
+  /* AI agents: plain text for the extension's MCP tools */
+
+  object Agent_Report {
+    def unapply(json: JSON.T): Option[(Id, JFile)] =
+      json match {
+        case RequestMessage(id, "PIDE/agent_report", Some(params)) =>
+          for (uri <- JSON.string(params, "uri") if Url.is_wellformed_file(uri))
+            yield (id, Url.absolute_file(uri))
+        case _ => None
+      }
+  }
+
+  object Agent_State extends RequestTextDocumentPosition("PIDE/agent_state")
+
+  sealed case class Agent_Try_Params(
+    node_pos: Line.Node_Position,
+    goal: String,
+    candidates: List[String],
+    timeout_ms: Int,
+    stats: Boolean,
+    watch_rules: List[String],
+    watch_patterns: List[String],
+    watch_limit: Int,
+    deadline_ms: Int)
+
+  object Agent_Try {
+    def unapply(json: JSON.T): Option[(Id, Agent_Try_Params)] =
+      json match {
+        case RequestMessage(id, "PIDE/agent_try", Some(params)) =>
+          for {
+            node_pos <- TextDocumentPosition.unapply(params)
+            candidates <- JSON.strings(params, "candidates")
+          } yield {
+            (id, Agent_Try_Params(node_pos,
+              JSON.string(params, "goal").getOrElse(""),
+              candidates,
+              JSON.int(params, "timeout_ms").getOrElse(10000),
+              JSON.bool(params, "stats").getOrElse(false),
+              JSON.strings(params, "watch_rules").getOrElse(Nil),
+              JSON.strings(params, "watch_patterns").getOrElse(Nil),
+              JSON.int(params, "watch_limit").getOrElse(20),
+              JSON.int(params, "deadline_ms").getOrElse(120000)))
+          }
+        case _ => None
+      }
+  }
+
+  object Agent_Sledgehammer {
+    def unapply(json: JSON.T): Option[(Id, Line.Node_Position, String, Int, Int)] =
+      json match {
+        case RequestMessage(id, "PIDE/agent_sledgehammer", Some(params)) =>
+          for (node_pos <- TextDocumentPosition.unapply(params))
+          yield {
+            (id, node_pos, JSON.string(params, "goal").getOrElse(""),
+              JSON.int(params, "timeout_s").getOrElse(30),
+              JSON.int(params, "deadline_ms").getOrElse(180000))
+          }
+        case _ => None
+      }
+  }
+
+  object Agent_Reply {
+    def apply(id: Id, result: JSON.T): JSON.T = ResponseMessage(id, Some(result))
   }
 
 
