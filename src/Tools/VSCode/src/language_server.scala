@@ -730,7 +730,10 @@ class Language_Server(
               else {
                 val st =
                   Document_Status.Node_Status.make(now, snapshot.state, snapshot.version, name)
-                if (st.consolidated) (if (st.ok) "checked" else "failed", 100)
+                /*only an 'end' consolidates a theory: one without is done when its
+                  commands are, as for Headless.use_theories*/
+                if (st.consolidated || st.quasi_consolidated)
+                  (if (st.ok) "checked" else "failed", 100)
                 else ("pending", st.percentage)
               }
           }

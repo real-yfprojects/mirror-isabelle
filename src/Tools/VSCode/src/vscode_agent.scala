@@ -193,6 +193,7 @@ class VSCode_Agent(server: Language_Server) {
           "outdated" -> snapshot.is_outdated,
           "percentage" -> st.percentage,
           "consolidated" -> st.consolidated,
+          "finalized" -> st.finalized,
           "ok" -> st.ok,
           "failed_commands" -> st.failed,
           "unprocessed_commands" -> st.unprocessed,
