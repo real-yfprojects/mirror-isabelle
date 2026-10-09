@@ -190,8 +190,9 @@ object LSP {
           "firstTriggerCharacter" -> "\n",
           "moreTriggerCharacter" -> List(" ")),
         "documentRangeFormattingProvider" -> true,
-        /*the PIDE/agent_* requests: a server that does not know a request never answers it*/
-        "experimental" -> JSON.Object("isabelleAgent" -> 1))
+        /*the PIDE/agent_* requests: a server that does not know a request never answers it;
+          the PIDE/sledgehammer_job_* messages*/
+        "experimental" -> JSON.Object("isabelleAgent" -> 1, "isabelleSledgehammerJobs" -> 1))
   }
 
   object Initialized extends Notification0("initialized")
@@ -623,15 +624,25 @@ object LSP {
       }
   }
 
+  /*job_id names the Sledgehammer job, so that PIDE/sledgehammer_job_cancel can stop it
+    when the agent cancels the call*/
+  sealed case class Agent_Sledgehammer_Params(
+    node_pos: Line.Node_Position,
+    goal: String,
+    timeout_s: Int,
+    deadline_ms: Int,
+    job_id: String)
+
   object Agent_Sledgehammer {
-    def unapply(json: JSON.T): Option[(Id, Line.Node_Position, String, Int, Int)] =
+    def unapply(json: JSON.T): Option[(Id, Agent_Sledgehammer_Params)] =
       json match {
         case RequestMessage(id, "PIDE/agent_sledgehammer", Some(params)) =>
           for (node_pos <- TextDocumentPosition.unapply(params))
           yield {
-            (id, node_pos, JSON.string(params, "goal").getOrElse(""),
+            (id, Agent_Sledgehammer_Params(node_pos, JSON.string(params, "goal").getOrElse(""),
               JSON.int(params, "timeout_s").getOrElse(30),
-              JSON.int(params, "deadline_ms").getOrElse(180000))
+              JSON.int(params, "deadline_ms").getOrElse(180000),
+              JSON.string(params, "job_id").getOrElse("")))
           }
         case _ => None
       }
@@ -1091,6 +1102,76 @@ object LSP {
           "line" -> node_pos.pos.line,
           "character" -> node_pos.pos.column,
           "text" -> text))
+  }
+
+  /*jobs: runs of their own, which go on while the text changes (VSCode_Sledgehammer). The
+    state is the one after the command at the position with at_command, as the panel shows
+    it; else the one before that command, or the goal it states, as for the agent's queries*/
+  sealed case class Sledgehammer_Job_Params(
+    id: String,
+    node_pos: Line.Node_Position,
+    at_command: Boolean,
+    goal: String,
+    subgoal: Int,
+    facts: String,
+    params: List[(String, String)],
+    stop_at_first: Boolean,
+    max_parallel: Int)
+
+  object Sledgehammer_Job_Start {
+    def unapply(json: JSON.T): Option[Sledgehammer_Job_Params] =
+      json match {
+        case Notification("PIDE/sledgehammer_job_start", Some(params)) =>
+          for {
+            id <- JSON.string(params, "id")
+            node_pos <- TextDocumentPosition.unapply(params)
+          } yield {
+            /*name, value, name, value ...*/
+            val pairs =
+              JSON.strings(params, "params").getOrElse(Nil).grouped(2).collect({
+                case List(a, b) => (a, b) }).toList
+            Sledgehammer_Job_Params(id, node_pos,
+              JSON.bool(params, "at_command").getOrElse(false),
+              JSON.string(params, "goal").getOrElse(""),
+              JSON.int(params, "subgoal").getOrElse(1),
+              JSON.string(params, "facts").getOrElse(""),
+              pairs,
+              JSON.bool(params, "stop_at_first").getOrElse(true),
+              JSON.int(params, "max_parallel").getOrElse(2))
+          }
+        case _ => None
+      }
+  }
+
+  object Sledgehammer_Job_Cancel {
+    def unapply(json: JSON.T): Option[String] =
+      json match {
+        case Notification("PIDE/sledgehammer_job_cancel", Some(params)) =>
+          JSON.string(params, "id")
+        case _ => None
+      }
+  }
+
+  /*status: queued, starting, running, finished, cancelled or error; with a message of the
+    run, as XML, and the proofs in it as they would be inserted; once running, the range of
+    the command whose state it works on*/
+  object Sledgehammer_Job_Update {
+    def apply(
+      id: String,
+      status: String,
+      message: String = "",
+      proofs: List[String] = Nil,
+      outcome: String = "",
+      error: String = "",
+      range: Option[Line.Range] = None
+    ): JSON.T =
+      Notification("PIDE/sledgehammer_job_update",
+        JSON.Object("id" -> id, "status" -> status) ++
+        JSON.optional("range" -> range.map(Range(_))) ++
+        JSON.optional("message" -> proper_string(message)) ++
+        (if (proofs.isEmpty) JSON.Object.empty else JSON.Object("proofs" -> proofs)) ++
+        JSON.optional("outcome" -> proper_string(outcome)) ++
+        JSON.optional("error" -> proper_string(error)))
   }
 
 
