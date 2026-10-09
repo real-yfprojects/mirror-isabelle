@@ -18,8 +18,8 @@ applied, the cycle of rules that repeats at the end of a run that timed out, and
 rules or terms the agent watches. The trace hooks (Raw_Simplifier.set_trace_ops) are theory
 data that Simplifier_Trace owns, so this reads the text of the classic simp_trace.
 
-Sledgehammer is a second operation, compiled only in a logic that contains it, as in
-vscode_sledgehammer.ML; its proofs are tried as candidates afterwards.
+Sledgehammer for agents is a job of vscode_sledgehammer.ML, which goes on while the theory
+is edited; the client tries its proofs as candidates afterwards.
 
 Loaded as a prelude of the prover process, like vscode_completion.ML: plain ML over Pure,
 without antiquotations, and declaring nothing at the toplevel.
@@ -412,66 +412,11 @@ fun try_all state {goal, timeout, stats, watch, candidates} =
       if Exn.is_interrupt exn then Exn.reraise exn
       else ([("error", content (Runtime.exn_message exn))], []));
 
-
-(** Sledgehammer: compiled in a logic that contains it **)
-
-(*the goal is opened as above; the found proofs are tried as candidates afterwards*)
-val sledgehammer_operation = "\
-\Command.no_print_function \"vscode_agent_sledgehammer_query\";\n\
-\Query_Operation.register {name = \"vscode_agent_sledgehammer\", pri = Task_Queue.urgent_pri}\n\
-\  (fn {state = st, args, output_result, ...} =>\n\
-\    let\n\
-\      val (goal, timeout) =\n\
-\        (case args of [g, t] => (g, t) | _ => error \"Bad arguments\");\n\
-\      val st' =\n\
-\        if goal = \"\" then st\n\
-\        else\n\
-\          let\n\
-\            val thy = Toplevel.theory_of st;\n\
-\            val text = (if Toplevel.is_proof st then \"have \" else \"lemma \") ^ goal;\n\
-\          in\n\
-\            fold (Toplevel.command_exception false)\n\
-\              (Outer_Syntax.parse_text thy (K thy) Position.none text) st\n\
-\          end;\n\
-\      val state0 = Toplevel.proof_of st';\n\
-\      val state =\n\
-\        Proof.map_contexts\n\
-\          (Try0_HOL.silence_methods #> Config.put SMT_Config.verbose false) state0;\n\
-\      val params =\n\
-\        Sledgehammer_Commands.default_params (Proof.theory_of state)\n\
-\          [(\"timeout\", timeout), (\"isar_proofs\", \"false\"), (\"try0\", \"true\"),\n\
-\           (\"debug\", \"false\"), (\"verbose\", \"false\"), (\"overlord\", \"false\")];\n\
-\      val messages = Synchronized.var \"vscode_agent_sledgehammer\" ([]: string list);\n\
-\      fun output s = Synchronized.change messages (cons s);\n\
-\      fun run () =\n\
-\        ignore (Sledgehammer.run_sledgehammer params Sledgehammer_Prover.Normal\n\
-\          (SOME output) 1 Sledgehammer_Fact.no_fact_override state);\n\
-\      val _ =\n\
-\        Future.join ((singleton o Future.forks)\n\
-\          {name = \"vscode_agent_sledgehammer\", group = NONE, deps = [], pri = ~2,\n\
-\            interrupts = true} run);\n\
-\    in\n\
-\      output_result [YXML.string_of_body (XML.Encode.list XML.Encode.string\n\
-\        (map (XML.content_of o YXML.parse_body) (rev (Synchronized.value messages))))]\n\
-\    end);\n";
-
 in
 
 val _ =
   Query_Operation.register {name = "vscode_agent_try", pri = Task_Queue.urgent_pri}
     (fn {state, args, output_result, ...} =>
       output_result [encode_result (try_all state (decode_args args))]);
-
-(*replaced below in a logic that contains Sledgehammer*)
-val _ =
-  Query_Operation.register {name = "vscode_agent_sledgehammer", pri = Task_Queue.urgent_pri}
-    (fn _ => error "Sledgehammer needs a session that contains it, like HOL");
-
-val _ =
-  (case Thy_Info.lookup_theory "HOL.Sledgehammer" of
-    SOME thy =>
-      ML_Context.eval_source_in (SOME (Proof_Context.init_global thy)) ML_Compiler.flags
-        (Input.string sledgehammer_operation)
-  | NONE => ());
 
 end;

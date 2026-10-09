@@ -18,7 +18,9 @@ import scala.annotation.tailrec
 
 object VSCode_Agent {
   val try_function = "vscode_agent_try_query"
-  val sledgehammer_function = "vscode_agent_sledgehammer_query"
+
+  /*what run_query says when the command went while the prover worked: worth trying again*/
+  val changed_message = "The theory changed at this position while the prover worked; try again"
 
   def prelude(log: Logger): Option[JFile] =
     Language_Server.ml_prelude("isabelle/vscode/vscode_agent.ML", "vscode_agent", log,
@@ -60,8 +62,8 @@ object VSCode_Agent {
   private def proper_before(node: Document.Node, command: Command): Option[Command] =
     node.commands.reverse.iterator(command).drop(1).find(_.is_proper)
 
-  /*what a query reports: its data, or the error it ended with*/
-  sealed case class Result(body: XML.Body, error: Option[String])
+  /*what a query reports: its data, or the error it ended with; and where its command was*/
+  sealed case class Result(body: XML.Body, error: Option[String], range: Option[Line.Range] = None)
 }
 
 class VSCode_Agent(server: Language_Server) {
@@ -127,7 +129,7 @@ class VSCode_Agent(server: Language_Server) {
   /*the proof state after a command, from Pure's query operation print_state*/
   private def print_state(model: VSCode_Model, command: Command): Option[String] =
     query_on(model, command, "print_state_query", Nil, Time.now() + Time.seconds(15)) match {
-      case Right(Result(body, None)) => Some(plain(body)).filter(_.nonEmpty)
+      case Right(Result(body, None, _)) => Some(plain(body)).filter(_.nonEmpty)
       case _ => None
     }
 
@@ -255,8 +257,9 @@ class VSCode_Agent(server: Language_Server) {
 
   /*the command whose state the query reads: the one before the command at the position --
     or that command itself, if it states a goal and the agent states none, so that the line
-    of a lemma means its goal*/
-  private def query_command(node_pos: Line.Node_Position, has_goal: Boolean)
+    of a lemma means its goal; with at_command, always the command at the position, whose
+    state the infoview shows there*/
+  private def query_command(node_pos: Line.Node_Position, has_goal: Boolean, at_command: Boolean)
       : Either[String, (VSCode_Model, Command)] =
     server.rendering_offset(node_pos) match {
       case None => Left("The theory is not loaded")
@@ -274,7 +277,8 @@ class VSCode_Agent(server: Language_Server) {
             case None => Left("There is no command at this position")
             case Some(command) =>
               val target =
-                if (!has_goal && command.is_proper && is_goal(keywords, command)) Some(command)
+                if (!has_goal && command.is_proper && (at_command || is_goal(keywords, command)))
+                  Some(command)
                 else proper_before(node, command)
               target match {
                 case Some(cmd) => Right((model, cmd))
@@ -318,17 +322,19 @@ class VSCode_Agent(server: Language_Server) {
   }
 
   /*runs a query and waits for it, off the message loop; the overlay goes when it is done,
-    or the deadline passes, or the theory changes underneath*/
-  private def run_query(
+    or the deadline passes, or the theory changes underneath, or stop says so*/
+  private[vscode] def run_query(
     node_pos: Line.Node_Position,
     has_goal: Boolean,
     function: String,
     args: List[String],
-    deadline: Time
+    deadline: Time,
+    at_command: Boolean = false,
+    stop: () => Boolean = () => false
   ): Either[String, Result] = {
     @tailrec def locate(): Either[String, (VSCode_Model, Command)] =
-      query_command(node_pos, has_goal) match {
-        case Left("outdated") if Time.now() < deadline =>
+      query_command(node_pos, has_goal, at_command) match {
+        case Left("outdated") if Time.now() < deadline && !stop() =>
           Time.seconds(0.1).sleep()
           locate()
         case Left("outdated") => Left("The theory is still being edited; try again")
@@ -337,9 +343,21 @@ class VSCode_Agent(server: Language_Server) {
 
     locate() match {
       case Left(msg) => Left(msg)
-      case Right((model, command)) => query_on(model, command, function, args, deadline)
+      case Right((model, command)) =>
+        query_on(model, command, function, args, deadline, stop = stop)
     }
   }
+
+  /*the range of a command in the text, as far as its core*/
+  private def command_range(model: VSCode_Model, snapshot: Document.Snapshot, command: Command)
+      : Option[Line.Range] =
+    snapshot.node.command_start(command).map({ start =>
+      val length = model.content.text_length
+      val range =
+        Text.Range(snapshot.convert(start) min length,
+          snapshot.convert(start + command.core_range.stop) min length)
+      model.content.doc.range(range)
+    })
 
   /*a query on the state after a command*/
   private def query_on(
@@ -347,7 +365,8 @@ class VSCode_Agent(server: Language_Server) {
     command: Command,
     function: String,
     args: List[String],
-    deadline: Time
+    deadline: Time,
+    stop: () => Boolean = () => false
   ): Either[String, Result] = {
     val instance = Document_ID.make().toString
     val overlay_args = instance :: args
@@ -356,11 +375,12 @@ class VSCode_Agent(server: Language_Server) {
     @tailrec def wait(): Either[String, Result] = {
       val snapshot = resources.snapshot(model)
       if (!snapshot.is_outdated && !snapshot.node.commands.contains(command)) {
-        Left("The theory changed at this position while the prover worked; try again")
+        Left(changed_message)
       }
+      else if (stop()) Left("Cancelled")
       else {
         result(snapshot, command, instance) match {
-          case Some(res) => Right(res)
+          case Some(res) => Right(res.copy(range = command_range(model, snapshot, command)))
           case None if Time.now() < deadline =>
             Time.seconds(0.05).sleep()
             wait()
@@ -401,8 +421,8 @@ class VSCode_Agent(server: Language_Server) {
         counted(candidates) ::: counted(watch_rules) ::: counted(watch_patterns)
     run_query(node_pos, goal.nonEmpty, try_function, args, deadline) match {
       case Left(msg) => JSON.Object("error" -> msg)
-      case Right(Result(_, Some(error))) => JSON.Object("error" -> error)
-      case Right(Result(body, None)) =>
+      case Right(Result(_, Some(error), _)) => JSON.Object("error" -> error)
+      case Right(Result(body, None, _)) =>
         try {
           import XML.Decode._
           val (header, cands) =
@@ -424,18 +444,19 @@ class VSCode_Agent(server: Language_Server) {
     }
   }
 
-  def sledgehammer(
-    node_pos: Line.Node_Position,
-    goal: String,
-    timeout_s: Int,
-    deadline: Time
-  ): JSON.Object.T =
-    run_query(node_pos, goal.nonEmpty, sledgehammer_function,
-      List(goal, timeout_s.toString), deadline) match {
+  /*a Sledgehammer job (VSCode_Sledgehammer), which goes on while the agent or the user edit
+    the theory: it stops at the first proof, and looks for a falsification of the goal too*/
+  def sledgehammer(p: LSP.Agent_Sledgehammer_Params): JSON.Object.T = {
+    val id = proper_string(p.job_id) getOrElse ("agent-" + Document_ID.make())
+    val params =
+      LSP.Sledgehammer_Job_Params(id, p.node_pos, at_command = false, goal = p.goal,
+        subgoal = 1, facts = "",
+        params = List("timeout" -> p.timeout_s.toString, "isar_proofs" -> "false",
+          "try0" -> "true", "max_proofs" -> "1", "falsify" -> "smart"),
+        stop_at_first = true, max_parallel = 0)
+    server.sledgehammer.run_job(params, Time.now() + Time.ms(p.deadline_ms)) match {
       case Left(msg) => JSON.Object("error" -> msg)
-      case Right(Result(_, Some(error))) => JSON.Object("error" -> error)
-      case Right(Result(body, None)) =>
-        try { JSON.Object("messages" -> XML.Decode.list(XML.Decode.string)(body).map(ascii)) }
-        catch { case _: XML.Error => JSON.Object("error" -> "Bad answer from the prover") }
+      case Right(messages) => JSON.Object("messages" -> messages)
     }
+  }
 }

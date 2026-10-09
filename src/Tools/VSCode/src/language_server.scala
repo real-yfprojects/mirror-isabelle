@@ -203,7 +203,7 @@ class Language_Server(
   def resources: VSCode_Resources = session.resources
   def ml_settings: ML_Settings = session.store.ml_settings
 
-  private val sledgehammer = new VSCode_Sledgehammer(server)
+  val sledgehammer = new VSCode_Sledgehammer(server)
   private val theories = new VSCode_Theories(server)
   private val simplifier_trace = new VSCode_Simplifier_Trace(server)
   private val graphview = new VSCode_Graphview(server)
@@ -232,7 +232,7 @@ class Language_Server(
 
   private val hover_info = new VSCode_Hover_Info(server)
 
-  private val agent = new VSCode_Agent(server)
+  val agent = new VSCode_Agent(server)
 
   /*how long a hover waits for the prover to say what a name stands for*/
   private def hover_delay: Time =
@@ -1076,9 +1076,9 @@ class Language_Server(
                 p.watch_rules, p.watch_patterns, p.watch_limit,
                 Time.now() + Time.ms(p.deadline_ms))
             }
-          case LSP.Agent_Sledgehammer(id, node_pos, goal, timeout_s, deadline_ms) =>
+          case LSP.Agent_Sledgehammer(id, p) =>
             agent_reply(id, "agent_sledgehammer") {
-              agent.sledgehammer(node_pos, goal, timeout_s, Time.now() + Time.ms(deadline_ms))
+              agent.sledgehammer(p)
             }
           case LSP.Goto_Command(id, offset) => goto_command(id, offset)
           case LSP.DocumentHighlights(id, node_pos) => document_highlights(id, node_pos)
@@ -1123,6 +1123,8 @@ class Language_Server(
           case LSP.Sledgehammer_Cancel() => sledgehammer.cancel()
           case LSP.Sledgehammer_Locate() => sledgehammer.locate()
           case LSP.Sledgehammer_Sendback(text) => sledgehammer.sendback(text)
+          case LSP.Sledgehammer_Job_Start(p) => sledgehammer.job_start(p)
+          case LSP.Sledgehammer_Job_Cancel(job) => sledgehammer.job_cancel(job)
           case _ => if (!LSP.ResponseMessage.is_empty(json)) log("### IGNORED")
         }
       }
