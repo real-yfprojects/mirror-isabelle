@@ -77,6 +77,14 @@ class VSCode_Agent(server: Language_Server) {
       case None => 0
     }
 
+  /*a command by where it is: its line (0-based, as in the messages), name and first line*/
+  private def place(model: VSCode_Model, snapshot: Document.Snapshot, command: Command)
+      : JSON.Object.T =
+    JSON.Object(
+      "line" -> line_of(model, snapshot, command),
+      "command" -> command.span.name,
+      "source" -> first_line(command))
+
   /*the goals that a command works on: those the command before it left -- as printed, or
     else asked of the prover, which prints states only for the text around the caret*/
   private def goals_before(
@@ -191,6 +199,21 @@ class VSCode_Agent(server: Language_Server) {
 
         def count(name: String): Int = node.commands.iterator.count(_.span.name == name)
 
+        /*where the prover is while the theory is not done: the commands it is running -- the
+          slow one among them, if it hangs -- and those it has not started, counted without
+          the blanks and comments that Node_Status counts with them*/
+        def commands_with(p: Document_Status.Command_Status => Boolean): List[Command] =
+          node.commands.iterator.filter(command =>
+            command.is_proper && p(snapshot.state.command_status(snapshot.version, command)))
+            .toList
+        val (running, waiting): (List[Command], List[Command]) =
+          if (st.running + st.unprocessed == 0) (Nil, Nil)
+          else {
+            (commands_with(_.is_running),
+             commands_with(status =>
+               !(status.is_running || status.is_failed || status.is_warned || status.is_finished)))
+          }
+
         JSON.Object(
           "outdated" -> snapshot.is_outdated,
           "percentage" -> st.percentage,
@@ -199,9 +222,13 @@ class VSCode_Agent(server: Language_Server) {
           "ok" -> st.ok,
           "failed_commands" -> st.failed,
           "unprocessed_commands" -> st.unprocessed,
+          "running_commands" -> running.length,
+          "waiting_commands" -> waiting.length,
+          "running" -> running.take(5).map(place(model, snapshot, _)),
           "sorry" -> count("sorry"),
           "oops" -> count("oops"),
-          "messages" -> messages)
+          "messages" -> messages) ++
+        JSON.optional("first_waiting" -> waiting.headOption.map(place(model, snapshot, _)))
     }
 
 
