@@ -16,6 +16,95 @@ import scala.annotation.tailrec
 
 
 object VSCode_Rendering {
+  /* completion */
+
+  /*the names the prover reported for the words typed from one start: VS Code filters them
+    itself (fuzzy, as the word grows), so they are kept whole rather than narrowed down --
+    a complete list for a word covers every extension of it*/
+  sealed case class Semantic_Cache(
+    node_name: Document.Node.Name,
+    start: Text.Offset,
+    original: String,
+    names: List[(String, (String, String))],
+    complete: Option[String]
+  ) {
+    def covers(word: String): Boolean = complete.exists(word.startsWith)
+
+    def add(word: String, more: Completion.Names): Semantic_Cache = {
+      val fresh = more.names.toSet
+      copy(
+        names = more.names ::: names.filterNot(fresh),
+        complete = complete orElse (if (more.total <= more.names.length) Some(word) else None))
+    }
+  }
+
+  object Semantic_Cache {
+    def make(
+      node_name: Document.Node.Name,
+      start: Text.Offset,
+      word: String,
+      names: Completion.Names
+    ): Semantic_Cache = Semantic_Cache(node_name, start, word, Nil, None).add(word, names)
+  }
+
+  private val semantic_kinds: Map[String, Int] =
+    Map(
+      Markup.CONSTANT -> LSP.CompletionItemKind.Constant,
+      Markup.FIXED -> LSP.CompletionItemKind.Variable,
+      Markup.FACT -> LSP.CompletionItemKind.Reference,
+      Markup.TYPE_NAME -> LSP.CompletionItemKind.Struct,
+      Markup.CLASS -> LSP.CompletionItemKind.Class,
+      Markup.LOCALE -> LSP.CompletionItemKind.Module,
+      Markup.BUNDLE -> LSP.CompletionItemKind.Module,
+      Markup.THEORY -> LSP.CompletionItemKind.Module,
+      Markup.METHOD -> LSP.CompletionItemKind.Method,
+      Markup.ATTRIBUTE -> LSP.CompletionItemKind.Property,
+      Markup.COMMAND -> LSP.CompletionItemKind.Keyword,
+      Markup.DOCUMENT_ANTIQUOTATION -> LSP.CompletionItemKind.Function,
+      Markup.ML_ANTIQUOTATION -> LSP.CompletionItemKind.Function)
+
+  private def semantic_kind(item: Completion.Item): Int =
+    Long_Name.explode(item.name).headOption.flatMap(semantic_kinds.get)
+      .getOrElse(LSP.CompletionItemKind.Value)
+
+  private def syntax_kind(item: Completion.Item): Int =
+    item.description match {
+      case _ :: descr :: _ if descr.startsWith("(symbol") => LSP.CompletionItemKind.Operator
+      case _ :: descr :: _ if descr.startsWith("(template") => LSP.CompletionItemKind.Snippet
+      case _ :: "(keyword)" :: _ => LSP.CompletionItemKind.Keyword
+      case _ => LSP.CompletionItemKind.Text
+    }
+
+  private def path_kind(item: Completion.Item): Int =
+    item.description match {
+      case _ :: "(directory)" :: _ => LSP.CompletionItemKind.Folder
+      case _ => LSP.CompletionItemKind.File
+    }
+
+  /*a theory block ("instantiation\nbegin\n\nend", Outer_Syntax): the caret right after the
+    keyword, where the name or arity goes before the body can be written -- except for the
+    blocks that take none*/
+  private val block_template = "\nbegin\n\nend"
+  private val unnamed_blocks = Set("notepad", "experiment")
+
+  def template_move(replacement: String, move: Int): Int = {
+    val keyword = replacement.stripSuffix(block_template)
+    if (move != 0 && keyword.length < replacement.length && keyword.nonEmpty &&
+        !unnamed_blocks(keyword)) keyword.length - replacement.length
+    else move
+  }
+
+  private def snippet_escape(s: String): String =
+    s.replace("\\", "\\\\").nn.replace("$", "\\$").nn.replace("}", "\\}").nn
+
+  /*the inner languages whose words are names of the formal context*/
+  private val inner_languages = Set("term", "prop", "type")
+
+  /*word characters would commit a unique item while it is still being typed*/
+  private val commit_characters: List[String] =
+    (' ' to '~').filterNot(c => Symbol.is_ascii_letdig(c) || c == '.').toList.map(_.toString)
+
+
   /* decorations */
 
   private def color_decorations(
@@ -37,6 +126,55 @@ object VSCode_Rendering {
 
   private val dotted_colors =
     Set(Rendering.Color.writeln, Rendering.Color.information, Rendering.Color.warning)
+
+
+  /* semantic markup: what the text colours leave plain */
+
+  /*Rendering.text_color paints delimiters like a string, and numerals and entities not at
+    all, so inside a term only the variables stand out. The editor can colour the rest by
+    category (as semantic tokens, through its colour theme); these categories only ever
+    add to the text colours, never override them*/
+  val semantic_categories: List[String] =
+    List("constant", "type_name", "class", "operator", "numeral")
+
+  private val semantic_entity_kinds =
+    Map(Markup.CONSTANT -> "constant", Markup.TYPE_NAME -> "type_name", Markup.CLASS -> "class")
+
+  private val semantic_elements =
+    Rendering.text_color_elements ++ Markup.Elements(Markup.ENTITY, Markup.NUMERAL)
+
+  // "" is markup that already has a text colour of its own: it wins, and yields nothing
+  private def semantic_category(markup: Markup): Option[String] =
+    markup match {
+      case Markup.Entity(entry) => semantic_entity_kinds.get(entry.kind)
+      case Markup(Markup.NUMERAL, _) => Some("numeral")
+      case Markup(Markup.DELIMITER, _) => Some("operator")
+      case _ =>
+        Rendering.get_text_color(markup) match {
+          case None | Some(Rendering.Color.main) => None
+          case Some(_) => Some("")
+        }
+    }
+
+  // for one token carrying several markups, e.g. `+`: delimiter and constant `plus`
+  private def semantic_rank(category: String): Int =
+    category match {
+      case "" => 0
+      case "operator" => 1
+      case "numeral" => 2
+      case _ => 3
+    }
+
+  private def semantic_decorations(
+    infos: List[Text.Info[String]]
+  ): List[VSCode_Model.Decoration] = {
+    val ranges =
+      infos.foldLeft(Map.empty[String, List[Text.Range]]) {
+        case (m, Text.Info(range, c)) => m + (c -> (range :: m.getOrElse(c, Nil)))
+      }
+    semantic_categories.map(c =>
+      VSCode_Model.Decoration.ranges("semantic_" + c, ranges.getOrElse(c, Nil).reverse))
+  }
 
 
   /* diagnostic messages */
@@ -64,6 +202,17 @@ object VSCode_Rendering {
 
   private val hyperlink_elements =
     Markup.Elements(Markup.ENTITY, Markup.PATH, Markup.DOC, Markup.POSITION)
+
+  private val hover_info_elements = Markup.Elements(Markup.ENTITY, Markup.VAR)
+
+  /*of the names on one range, the one a hover tells about: a case before the facts that
+    are named like it, a fixed variable before what it is a skolem of*/
+  private val hover_info_rank: Map[String, Int] =
+    Map(Markup.CASE -> 0, Markup.VAR -> 1, Markup.FIXED -> 2, Markup.CONSTANT -> 3,
+      Markup.FACT -> 4)
+
+  private val indentation_elements =
+    Markup.Elements(Markup.Command_Indent.name)
 }
 
 class VSCode_Rendering(snapshot: Document.Snapshot, val model: VSCode_Model)
@@ -79,12 +228,165 @@ extends Rendering(snapshot, model.session.resources.options, model.session) {
 
   /* completion */
 
-  def completion(node_pos: Line.Node_Position, caret: Text.Offset): List[LSP.CompletionItem] = {
+  private def is_word_before(caret: Text.Offset): Boolean =
+    caret > 0 && get_text(Text.Range(caret - 1, caret)).exists(s =>
+      s.length == 1 && Completion.Word_Parsers.is_word_char(s(0)))
+
+  /*the cache for the word ending at the caret, and that word*/
+  private def cached_semantic(caret: Text.Offset): Option[(VSCode_Rendering.Semantic_Cache, String)] =
+    for {
+      cache <- resources.completion_cache.value
+      if cache.node_name == model.node_name
+      if cache.start < caret && !is_word_before(cache.start)
+      word <- get_text(Text.Range(cache.start, caret))
+      if Completion.Word_Parsers.is_word(word) && word.startsWith(cache.original)
+    } yield (cache, word)
+
+  /*no completion, semantic result, and whether it may still lack names*/
+  private def vscode_semantic_completion(
+    history: Completion.History,
+    unicode_symbols: Boolean,
+    completed_range: Option[Text.Range],
+    caret: Text.Offset
+  ): (Boolean, Option[Completion.Result], Boolean) = {
+    def result(cache: VSCode_Rendering.Semantic_Cache, range: Text.Range, word: String)
+        : (Boolean, Option[Completion.Result], Boolean) =
+      (false,
+        Completion.Names(cache.names.length, cache.names)
+          .complete(range, history, unicode_symbols, word),
+        !cache.covers(word))
+
+    if (snapshot.is_outdated) {
+      cached_semantic(caret) match {
+        case Some((cache, word)) => result(cache, Text.Range(cache.start, caret), word)
+        case None => (false, None, true)
+      }
+    }
+    else {
+      semantic_completion(completed_range, before_caret_range(caret)) match {
+        case Some(Text.Info(_, Completion.No_Completion)) => (true, None, false)
+        case Some(Text.Info(range, names: Completion.Names)) =>
+          get_text(range) match {
+            case Some(word) if Completion.Word_Parsers.is_word(word) =>
+              val cache =
+                resources.completion_cache.change_result { cache0 =>
+                  val cache1 =
+                    cache0 match {
+                      case Some(c) if c.node_name == model.node_name && c.start == range.start &&
+                        word.startsWith(c.original) => c.add(word, names)
+                      case _ =>
+                        VSCode_Rendering.Semantic_Cache.make(
+                          model.node_name, range.start, word, names)
+                    }
+                  (cache1, Some(cache1))
+                }
+              result(cache, range, word)
+            case Some(original) =>
+              (false, names.complete(range, history, unicode_symbols, original),
+                names.total > names.names.length)
+            case None => (false, None, false)
+          }
+        case None => (false, None, true)
+      }
+    }
+  }
+
+  /*the innermost delimited language at a range, if its words are names of the context*/
+  private def inner_language(range: Text.Range): Option[String] =
+    snapshot.select(range, Rendering.language_elements, _ =>
+      {
+        case Text.Info(info_range, XML.Elem(Markup.Language(lang), _)) if lang.delimited =>
+          Some((info_range.length, lang.name))
+        case _ => None
+      }).map(_.info).minByOption(_._1).map(_._2).filter(VSCode_Rendering.inner_languages)
+
+  /*the name being typed: word characters before the caret, from a letter on*/
+  private def word_range(caret: Text.Offset): Option[(Text.Range, String)] =
+    for {
+      text <- get_text(Text.Range((caret - 256) max 0, caret))
+      n = text.reverseIterator.takeWhile(Completion.Word_Parsers.is_word_char).length
+      if n > 0
+      word = text.drop(text.length - n)
+      if Symbol.is_ascii_letter(word(0))
+    } yield (Text.Range(caret - n, caret), word)
+
+  /*within inner syntax: the word before the caret, whether it has to be a type, and its
+    context -- None while the prover has yet to report it*/
+  private def inner_names(caret: Text.Offset, context_names: VSCode_Context_Names)
+      : Option[(Text.Range, String, Boolean, Option[VSCode_Context_Names.Context])] =
+    for {
+      lang <- inner_language(before_caret_range(caret))
+      (range, word) <- word_range(caret)
+      command <- context_names.context_command(snapshot, caret)
+    } yield (range, word, lang == "type", context_names.get(snapshot, command))
+
+  /*the prover has yet to report on the word being typed, and may still do so: within inner
+    syntax, only the names of the context are worth waiting for*/
+  def completion_pending(caret: Text.Offset, context_names: VSCode_Context_Names): Boolean =
+    is_word_before(caret) && {
+      inner_names(caret, context_names) match {
+        case Some((_, _, _, context)) => context.isEmpty
+        case None => semantic_pending(caret)
+      }
+    }
+
+  private def semantic_pending(caret: Text.Offset): Boolean =
+    if (snapshot.is_outdated) {
+      cached_semantic(caret).forall({ case (cache, word) => !cache.covers(word) })
+    }
+    else {
+      val caret_range = before_caret_range(caret)
+      semantic_completion(None, caret_range).isEmpty &&
+        snapshot.node.command_iterator(caret_range).nextOption().exists(
+          { case (command, _) =>
+              !snapshot.state.command_status(snapshot.version, command).is_terminated })
+    }
+
+  /*the prover's own report first, without the parameters of class instances; within inner
+    syntax, the names of the context otherwise*/
+  private def semantic_or_context_completion(
+    history: Completion.History,
+    unicode_symbols: Boolean,
+    completed_range: Option[Text.Range],
+    caret: Text.Offset,
+    context_names: VSCode_Context_Names
+  ): (Boolean, Option[Completion.Result], Boolean) =
+    vscode_semantic_completion(history, unicode_symbols, completed_range, caret) match {
+      case (false, None, incomplete) =>
+        inner_names(caret, context_names) match {
+          case Some((range, word, types_only, Some(context))) =>
+            val (selected, more) =
+              VSCode_Context_Names.select(
+                context.names, word, types_only, context_names.completion_limit)
+            val result =
+              Completion.Names(selected.length, selected)
+                .complete(range, history, unicode_symbols, word)
+            (false, result, more || result.isEmpty)
+          case Some((_, _, _, None)) => (false, None, true)
+          case None => (false, None, incomplete)
+        }
+      /*until the context's list is in, by their shape -- and asked again then*/
+      case (false, Some(result), incomplete) if VSCode_Context_Names.has_constants(result) =>
+        val context =
+          context_names.context_command(snapshot, caret).flatMap(context_names.get(snapshot, _))
+        val result1 =
+          VSCode_Context_Names.without_inst_params(result, context.map(_.inst_params))
+        (false, result1, incomplete || context.isEmpty && !result1.contains(result))
+      case res => res
+    }
+
+  /*items, and whether more typing may bring names the list lacks: VS Code asks again only then,
+    and otherwise filters the list itself*/
+  def completion(
+    node_pos: Line.Node_Position,
+    caret: Text.Offset,
+    context_names: VSCode_Context_Names
+  ): (List[LSP.CompletionItem], Boolean) = {
     val doc = model.content.doc
     val line = node_pos.line
     val unicode_symbols = resources.unicode_symbols_edits
     doc.offset(Line.Position(line)) match {
-      case None => Nil
+      case None => (Nil, false)
       case Some(line_start) =>
         val history = Completion.History.empty
         val caret_range = before_caret_range(caret)
@@ -95,46 +397,80 @@ extends Rendering(snapshot, model.session.resources.options, model.session) {
             line_start, doc.lines(line).text, caret - line_start,
             language_context(caret_range) getOrElse syntax.language_context)
 
-        val (no_completion, semantic_completion) =
-          rendering.semantic_completion_result(
-            history, unicode_symbols, syntax_completion.map(_.range), caret_range)
+        val (no_completion, semantic_completion, semantic_incomplete) =
+          semantic_or_context_completion(
+            history, unicode_symbols, syntax_completion.map(_.range), caret, context_names)
 
-        if (no_completion) Nil
+        if (no_completion) (Nil, false)
         else {
-          val results =
-            Completion.Result.merge(history,
-              semantic_completion,
-              syntax_completion,
-              VSCode_Spell_Checker.completion(rendering, caret),
-              path_completion(caret))
+          val spell_completion = VSCode_Spell_Checker.completion(rendering, caret)
+          val path_completion = rendering.path_completion(caret)
+
+          def kinds(result: Option[Completion.Result], kind: Completion.Item => Int)
+            : List[(Completion.Item, Int)] =
+            result.toList.flatMap(_.items.map(item => item -> kind(item)))
+          val item_kind =
+            (kinds(semantic_completion, VSCode_Rendering.semantic_kind) :::
+              kinds(syntax_completion, VSCode_Rendering.syntax_kind) :::
+              kinds(spell_completion, _ => LSP.CompletionItemKind.Text) :::
+              kinds(path_completion, VSCode_Rendering.path_kind)).toMap
+          val semantic_items = semantic_completion.toList.flatMap(_.items).toSet
+
           val items =
-            results match {
+            Completion.Result.merge(history,
+              semantic_completion, syntax_completion, spell_completion, path_completion
+            ) match {
               case None => Nil
               case Some(result) =>
-                val commit_characters = (' ' to '~').toList.map(_.toString)
-
                 result.items.map(item => {
-                  val kind = item.description match {
-                    case _ :: "(keyword)" :: _ => LSP.CompletionItemKind.Keyword
-                    case _ => LSP.CompletionItemKind.Text
-                  }
-
+                  val move = VSCode_Rendering.template_move(item.replacement, item.move)
+                  val (text, snippet) =
+                    if (move == 0) (item.replacement, false)
+                    else {
+                      val (s1, s2) =
+                        item.replacement.splitAt(item.replacement.length + move)
+                      (VSCode_Rendering.snippet_escape(s1) + "$0" +
+                        VSCode_Rendering.snippet_escape(s2), true)
+                    }
                   LSP.CompletionItem(
                     label = item.replacement,
-                    kind = Some(kind),
+                    kind = Some(item_kind.getOrElse(item, LSP.CompletionItemKind.Text)),
                     detail = Some(item.description.mkString(" ")),
-                    filter_text = Some(item.original),
+                    filter_text =
+                      if (Completion.Word_Parsers.is_word(item.original)) None
+                      else Some(item.original),
                     commit_characters =
-                      if (result.unique && item.immediate) Some(commit_characters) else None,
-                    text = Some(item.replacement),
+                      if (result.unique && item.immediate) {
+                        Some(VSCode_Rendering.commit_characters)
+                      }
+                      else None,
+                    text = Some(text),
+                    snippet = snippet,
                     range = Some(doc.range(item.range)),
-                  )
+                    data =
+                      if (semantic_items(item)) {
+                        VSCode_Hover_Info.completion_key(item).map(_.json)
+                      }
+                      else None)
                 })
             }
-          items ::: VSCode_Spell_Checker.menu_items(rendering, caret)
+          val all_items =
+            (items ::: VSCode_Spell_Checker.menu_items(rendering, caret)).zipWithIndex.map(
+              { case (item, i) => item.copy(sort_text = Some("%05d".format(i))) })
+          (all_items, is_word_before(caret) && semantic_incomplete)
         }
     }
   }
+
+
+  /* indentation */
+
+  def indentation(range: Text.Range): Int =
+    snapshot.select(range, VSCode_Rendering.indentation_elements, _ =>
+      {
+        case Text.Info(_, XML.Elem(Markup.Command_Indent(i), _)) => Some(i)
+        case _ => None
+      }).headOption.map(_.info).getOrElse(0)
 
 
   /* diagnostics */
@@ -170,6 +506,34 @@ extends Rendering(snapshot, model.session.resources.options, model.session) {
       {
         case Text.Info(_, elem) => Rendering.get_text_color(elem.markup)
       })
+
+
+  /* semantic markup */
+
+  /*the innermost markup wins, as in text_color; among the markups of one token the
+    category ranks decide, which is why the accumulated result carries its range.
+    HOL's 0 and 1 are notation, not numeral tokens: a delimiter made of digits is
+    reported as a numeral, which is what it reads as*/
+  def semantic(range: Text.Range): List[Text.Info[String]] =
+    snapshot.cumulate[Option[(Text.Range, String)]](
+      range, None, VSCode_Rendering.semantic_elements, _ =>
+        {
+          case (acc, Text.Info(r, elem)) =>
+            VSCode_Rendering.semantic_category(elem.markup).map(c =>
+              acc match {
+                case Some((r0, c0)) if r0 == r &&
+                  VSCode_Rendering.semantic_rank(c0) <= VSCode_Rendering.semantic_rank(c) => acc
+                case _ => Some((r, c))
+              })
+        }).flatMap(
+          {
+            case Text.Info(r, Some((_, c))) if c.nonEmpty =>
+              val digits =
+                c == "operator" &&
+                  get_text(r).exists(s => s.nonEmpty && s.forall(Symbol.is_ascii_digit))
+              Some(Text.Info(r, if (digits) "numeral" else c))
+            case _ => None
+          })
 
 
   /* text overview color */
@@ -221,6 +585,8 @@ extends Rendering(snapshot, model.session.resources.options, model.session) {
       foreground(model.content.text_range)) :::
     VSCode_Rendering.color_decorations("text_", Rendering.Color.text_colors,
       snapshot.command_spans().flatMap(info => text_color(info.range))) :::
+    VSCode_Rendering.semantic_decorations(
+      snapshot.command_spans().flatMap(info => semantic(info.range))) :::
     VSCode_Rendering.color_decorations("text_overview_", Rendering.Color.text_overview_colors,
       text_overview_color) :::
     VSCode_Rendering.color_decorations("dotted_", VSCode_Rendering.dotted_colors,
@@ -289,6 +655,98 @@ extends Rendering(snapshot, model.session.resources.options, model.session) {
       case Position.Item_Def_Id(id, range) => hyperlink_command(id, range)
       case _ => None
     }
+
+  /*a link to where an entity is defined, for a hover in Markdown: a file URI whose
+    fragment VS Code reads as the line and column to open it at*/
+  def hover_link(props: Properties.T): Option[String] =
+    hyperlink_def_position(props).map(loc =>
+      Url.print_file_name(loc.name) + "#L" + (loc.range.start.line + 1) + "," +
+        (loc.range.start.column + 1))
+
+
+  /* hover info */
+
+  private val Fact_Selection = """\(([0-9]+(?:-[0-9]*)?(?:,[0-9]+(?:-[0-9]*)?)*)\)""".r
+
+  /*the selection after the name of a fact, "2" of assms(2)*/
+  private def fact_selection(stop: Text.Offset): String = {
+    val text = model.content.text
+    if (stop < text.length && text(stop) == '(') {
+      Fact_Selection.findPrefixMatchOf(text.substring(stop, (stop + 64) min text.length).nn) match {
+        case Some(m) => m.group(1)
+        case None => ""
+      }
+    }
+    else ""
+  }
+
+  /*the first execution of a command: another one means that its context may differ*/
+  private def command_exec(command: Command): Option[Document_ID.Exec] =
+    for {
+      assignment <- snapshot.state.assignments.get(snapshot.version.id)
+      exec <- assignment.get(command.id).headOption
+    } yield exec
+
+  /*the next command with a context of its own*/
+  @tailrec private def proper_after(command: Command): Option[Command] =
+    snapshot.node.commands.next(command) match {
+      case Some(command1) if !command1.is_proper => proper_after(command1)
+      case res => res
+    }
+
+  /*what a name that completion offers at an offset stands for is asked of the context
+    the names come from, which is before the command being written*/
+  def completion_info_request(
+    offset: Text.Offset,
+    key: VSCode_Hover_Info.Key,
+    context_names: VSCode_Context_Names
+  ): Option[VSCode_Hover_Info.Request] =
+    context_names.context_command(snapshot, offset).map(command =>
+      VSCode_Hover_Info.Request(command, command_exec(command), key))
+
+  /*the name at an offset that the hover info query knows about, with the contexts to ask,
+    the first one that knows it answers: a fact that a command refers to is in the context
+    before it, as that command may close the block of a local fact; everything else is in
+    the context after its command -- or, for a name that a command binds by proving
+    something (obtain, have h:), after the next one, which ends a proof by a single method;
+    a later context is asked only when an earlier one has nothing*/
+  def hover_request(offset: Text.Offset, context_names: VSCode_Context_Names)
+      : Option[(Text.Range, List[VSCode_Hover_Info.Request])] = {
+    if (snapshot.is_outdated) None
+    else {
+      val keys =
+        snapshot.cumulate[List[(Text.Range, VSCode_Hover_Info.Key, Boolean)]](
+          Text.Range(offset, offset + 1), Nil, VSCode_Rendering.hover_info_elements, _ =>
+            {
+              case (keys, Text.Info(r0, XML.Elem(markup @ Markup.Entity(entry), _)))
+              if VSCode_Hover_Info.kinds(entry.kind) && entry.name.nonEmpty =>
+                val is_def = Markup.Entity.Def.unapply(markup).isDefined
+                Some((snapshot.convert(r0), VSCode_Hover_Info.Key(entry.kind, entry.name), is_def) :: keys)
+              case (keys, Text.Info(r0, XML.Elem(Markup(Markup.VAR, Markup.Name(name)), _))) =>
+                Some((snapshot.convert(r0), VSCode_Hover_Info.Key(Markup.VAR, name), false) :: keys)
+              case _ => None
+            }).flatMap(_.info)
+
+      keys.sortBy({ case (r, key, _) =>
+        (r.length, VSCode_Rendering.hover_info_rank.getOrElse(key.kind, 9)) }).headOption
+      .flatMap({ case (range, key0, is_def) =>
+        val ref_fact = key0.kind == Markup.FACT && !is_def
+        val key = if (ref_fact) key0.copy(selection = fact_selection(range.stop)) else key0
+        val contexts =
+          if (ref_fact) context_names.context_command(snapshot, offset).toList
+          else {
+            snapshot.node.command_iterator(snapshot.revert(offset)).nextOption().toList
+              .flatMap({ case (command, _) =>
+                command :: proper_after(command).toList })
+          }
+        if (contexts.isEmpty) None
+        else {
+          Some((range, contexts.map(command =>
+            VSCode_Hover_Info.Request(command, command_exec(command), key))))
+        }
+      })
+    }
+  }
 
   def hyperlinks(range: Text.Range): List[Text.Info[Line.Node_Range]] =
     make_hyperlinks(range, elements = VSCode_Rendering.hyperlink_elements) {

@@ -150,7 +150,22 @@ object LSP {
 
   /* init and exit */
 
-  object Initialize extends Request0("initialize") {
+  object Initialize {
+    /*whether the client renders HTML in hovers (MarkdownString.supportHtml): its
+      initializationOptions say so, as htmlHovers*/
+    def unapply(json: JSON.T): Option[(Id, Boolean)] =
+      json match {
+        case RequestMessage(id, "initialize", params) =>
+          val html_hovers =
+            for {
+              p <- params
+              options <- JSON.value(p, "initializationOptions")
+              b <- JSON.bool(options, "htmlHovers")
+            } yield b
+          Some((id, html_hovers.getOrElse(false)))
+        case _ => None
+      }
+
     def reply(id: Id, error: String): JSON.T =
       ResponseMessage.strict(
         id, Some(JSON.Object("capabilities" -> ServerCapabilities.json)), error)
@@ -160,16 +175,26 @@ object LSP {
     val json: JSON.T =
       JSON.Object(
         "textDocumentSync" -> 2,
+        /*no word characters: within a word, VS Code filters the list it has;
+          "." separates words in VS Code but not in long names*/
         "completionProvider" -> JSON.Object(
-          "resolveProvider" -> false,
+          "resolveProvider" -> true,
           "triggerCharacters" ->
-            (Symbol.symbols.entries.flatMap(_.abbrevs).flatMap(_.toList).map(_.toString)
-            ++ Symbol.symbols.entries.map(_.name).flatMap(_.toList).map(_.toString)).distinct
+            ("\\" :: "." :: Symbol.symbols.entries.flatMap(_.abbrevs).flatMap(_.toList)
+              .filterNot(Symbol.is_ascii_letdig).map(_.toString)).distinct
         ),
         "hoverProvider" -> true,
         "definitionProvider" -> true,
+        "referencesProvider" -> true,
         "documentHighlightProvider" -> true,
-        "codeActionProvider" -> true)
+        "codeActionProvider" -> true,
+        "documentOnTypeFormattingProvider" -> JSON.Object(
+          "firstTriggerCharacter" -> "\n",
+          "moreTriggerCharacter" -> List(" ")),
+        "documentRangeFormattingProvider" -> true,
+        /*the PIDE/agent_* requests: a server that does not know a request never answers it;
+          the PIDE/sledgehammer_job_* messages*/
+        "experimental" -> JSON.Object("isabelleAgent" -> 1, "isabelleSledgehammerJobs" -> 1))
   }
 
   object Initialized extends Notification0("initialized")
@@ -402,10 +427,13 @@ object LSP {
     detail: Option[String] = None,
     documentation: Option[String] = None,
     filter_text: Option[String] = None,
+    sort_text: Option[String] = None,
     commit_characters: Option[List[String]] = None,
     text: Option[String] = None,
+    snippet: Boolean = false,
     range: Option[Line.Range] = None,
-    command: Option[Command] = None
+    command: Option[Command] = None,
+    data: Option[JSON.Object.T] = None
   ) {
     def json: JSON.T =
       JSON.Object("label" -> label) ++
@@ -413,14 +441,31 @@ object LSP {
       JSON.optional("detail" -> detail) ++
       JSON.optional("documentation" -> documentation) ++
       JSON.optional("filterText" -> filter_text) ++
+      JSON.optional("sortText" -> sort_text) ++
+      (if (snippet) JSON.Object("insertTextFormat" -> 2) else JSON.Object.empty) ++
       JSON.optional("textEdit" -> range.map(TextEdit(_, text.getOrElse(label)).json)) ++
       JSON.optional("commitCharacters" -> commit_characters) ++
-      JSON.optional("command" -> command.map(_.json))
+      JSON.optional("command" -> command.map(_.json)) ++
+      JSON.optional("data" -> data)
   }
 
   object Completion extends RequestTextDocumentPosition("textDocument/completion") {
-    def reply(id: Id, result: List[CompletionItem]): JSON.T =
-      ResponseMessage(id, Some(result.map(_.json)))
+    def reply(id: Id, result: List[CompletionItem], incomplete: Boolean = false): JSON.T =
+      ResponseMessage(id,
+        Some(JSON.Object("isIncomplete" -> incomplete, "items" -> result.map(_.json))))
+  }
+
+  /*the details of the item that the client shows: the request carries the item as it was
+    sent, the reply is that item with them*/
+  object CompletionResolve {
+    def unapply(json: JSON.T): Option[(Id, JSON.Object.T)] =
+      json match {
+        case RequestMessage(id, "completionItem/resolve", Some(JSON.Object(item))) =>
+          Some((id, item))
+        case _ => None
+      }
+
+    def reply(id: Id, item: JSON.Object.T): JSON.T = ResponseMessage(id, Some(item))
   }
 
 
@@ -456,6 +501,18 @@ object LSP {
           case Some((range, contents)) =>
             JSON.Object(
               "contents" -> MarkedStrings.json(contents).getOrElse(Nil),
+              "range" -> Range(range))
+          case None => JSON.Object("contents" -> Nil)
+        }
+      ResponseMessage(id, Some(res))
+    }
+
+    def reply_markdown(id: Id, result: Option[(Line.Range, String)]): JSON.T = {
+      val res =
+        result match {
+          case Some((range, markdown)) =>
+            JSON.Object(
+              "contents" -> JSON.Object("kind" -> "markdown", "value" -> markdown),
               "range" -> Range(range))
           case None => JSON.Object("contents" -> Nil)
         }
@@ -513,6 +570,143 @@ object LSP {
       }
   }
 
+  /* references request */
+
+  object References {
+    def unapply(json: JSON.T): Option[(Id, Line.Node_Position, Boolean)] =
+      json match {
+        case RequestMessage(id, "textDocument/references", Some(params)) =>
+          for (node_pos <- TextDocumentPosition.unapply(params))
+          yield {
+            val include_declaration =
+              JSON.value(params, "context").flatMap(JSON.bool(_, "includeDeclaration"))
+            (id, node_pos, include_declaration.getOrElse(true))
+          }
+        case _ => None
+      }
+
+    def reply(id: Id, result: List[Line.Node_Range]): JSON.T =
+      ResponseMessage(id, Some(result.map(Location.apply)))
+  }
+
+
+  /* dependent theories: unloaded ones that may refer to an entity, and checking them */
+
+  private def files_param(params: JSON.T): Option[List[JFile]] =
+    JSON.strings(params, "files").map(_.filter(Url.is_wellformed_file).map(Url.absolute_file))
+
+  object Dependents_Request {
+    def unapply(json: JSON.T): Option[(Id, Line.Node_Position, List[JFile])] =
+      json match {
+        case RequestMessage(id, "PIDE/dependents", Some(params)) =>
+          for {
+            node_pos <- TextDocumentPosition.unapply(params)
+            files <- files_param(params)
+          } yield (id, node_pos, files)
+        case _ => None
+      }
+
+    def reply(id: Id, names: List[String], theories: List[JFile], in_image: List[JFile])
+        : JSON.T =
+      ResponseMessage(id, Some(
+        JSON.Object(
+          "names" -> names,
+          "theories" -> theories.map(Url.print_file),
+          "in_image" -> in_image.map(Url.print_file))))
+  }
+
+  object Check_Theories {
+    def unapply(json: JSON.T): Option[(Id, List[JFile])] =
+      json match {
+        case RequestMessage(id, "PIDE/check_theories", Some(params)) =>
+          files_param(params).map((id, _))
+        case _ => None
+      }
+
+    def theory(file: JFile, status: String, percentage: Int): JSON.T =
+      JSON.Object("uri" -> Url.print_file(file), "status" -> status, "percentage" -> percentage)
+
+    def reply(id: Id, theories: List[JSON.T]): JSON.T =
+      ResponseMessage(id, Some(JSON.Object("theories" -> theories)))
+  }
+
+
+  /* AI agents: plain text for the extension's MCP tools */
+
+  object Agent_Report {
+    def unapply(json: JSON.T): Option[(Id, JFile)] =
+      json match {
+        case RequestMessage(id, "PIDE/agent_report", Some(params)) =>
+          for (uri <- JSON.string(params, "uri") if Url.is_wellformed_file(uri))
+            yield (id, Url.absolute_file(uri))
+        case _ => None
+      }
+  }
+
+  object Agent_State extends RequestTextDocumentPosition("PIDE/agent_state")
+
+  sealed case class Agent_Try_Params(
+    node_pos: Line.Node_Position,
+    goal: String,
+    candidates: List[String],
+    timeout_ms: Int,
+    stats: Boolean,
+    watch_rules: List[String],
+    watch_patterns: List[String],
+    watch_limit: Int,
+    deadline_ms: Int)
+
+  object Agent_Try {
+    def unapply(json: JSON.T): Option[(Id, Agent_Try_Params)] =
+      json match {
+        case RequestMessage(id, "PIDE/agent_try", Some(params)) =>
+          for {
+            node_pos <- TextDocumentPosition.unapply(params)
+            candidates <- JSON.strings(params, "candidates")
+          } yield {
+            (id, Agent_Try_Params(node_pos,
+              JSON.string(params, "goal").getOrElse(""),
+              candidates,
+              JSON.int(params, "timeout_ms").getOrElse(10000),
+              JSON.bool(params, "stats").getOrElse(false),
+              JSON.strings(params, "watch_rules").getOrElse(Nil),
+              JSON.strings(params, "watch_patterns").getOrElse(Nil),
+              JSON.int(params, "watch_limit").getOrElse(20),
+              JSON.int(params, "deadline_ms").getOrElse(120000)))
+          }
+        case _ => None
+      }
+  }
+
+  /*job_id names the Sledgehammer job, so that PIDE/sledgehammer_job_cancel can stop it
+    when the agent cancels the call*/
+  sealed case class Agent_Sledgehammer_Params(
+    node_pos: Line.Node_Position,
+    goal: String,
+    timeout_s: Int,
+    deadline_ms: Int,
+    job_id: String)
+
+  object Agent_Sledgehammer {
+    def unapply(json: JSON.T): Option[(Id, Agent_Sledgehammer_Params)] =
+      json match {
+        case RequestMessage(id, "PIDE/agent_sledgehammer", Some(params)) =>
+          for (node_pos <- TextDocumentPosition.unapply(params))
+          yield {
+            (id, Agent_Sledgehammer_Params(node_pos, JSON.string(params, "goal").getOrElse(""),
+              JSON.int(params, "timeout_s").getOrElse(30),
+              JSON.int(params, "deadline_ms").getOrElse(180000),
+              JSON.string(params, "job_id").getOrElse("")))
+          }
+        case _ => None
+      }
+  }
+
+  object Agent_Reply {
+    def apply(id: Id, result: JSON.T): JSON.T = ResponseMessage(id, Some(result))
+  }
+
+
   /* document highlights request */
 
   object DocumentHighlight {
@@ -567,9 +761,27 @@ object LSP {
 
   /* actions */
 
-  sealed case class CodeAction(title: String, edits: List[TextDocumentEdit]) {
+  sealed case class CodeAction(
+    title: String,
+    edits: List[TextDocumentEdit],
+    kind: Option[String] = None,
+    is_preferred: Boolean = false
+  ) {
     def json: JSON.T =
-      JSON.Object("title" -> title, "edit" -> WorkspaceEdit(edits))
+      JSON.Object("title" -> title, "edit" -> WorkspaceEdit(edits)) ++
+      JSON.optional("kind" -> kind) ++
+      (if (is_preferred) JSON.Object("isPreferred" -> true) else JSON.Object.empty)
+  }
+
+  object CodeActionKind {
+    /*Isabelle's own outline of a proof method's cases: "Proof outline with cases"*/
+    val outline = "refactor.rewrite.isabelle.outline"
+    /*a proof found by try0, Sledgehammer etc.*/
+    val proof = "quickfix.isabelle.proof"
+    /*a skeleton determined by the text already written*/
+    val skeleton = "refactor.rewrite.isabelle.skeleton"
+    /*one possible skeleton among others*/
+    val suggestion = "refactor.rewrite.isabelle.suggestion"
   }
 
   object CodeActionRequest {
@@ -603,6 +815,52 @@ object LSP {
           } yield (XML.Elem(markup, body), text)
         case _ => None
       }
+  }
+
+
+  /* formatting: indentation */
+
+  object FormattingOptions {
+    def unapply(json: JSON.T): Option[VSCode_Indent.Format] =
+      for {
+        tab_size <- JSON.int(json, "tabSize")
+        insert_spaces <- JSON.bool(json, "insertSpaces")
+      } yield VSCode_Indent.Format(tab_size, insert_spaces)
+  }
+
+  object OnTypeFormatting {
+    def unapply(json: JSON.T): Option[(Id, JFile, Line.Position, String, VSCode_Indent.Format)] =
+      json match {
+        case RequestMessage(id, "textDocument/onTypeFormatting", Some(params)) =>
+          for {
+            doc <- JSON.value(params, "textDocument")
+            uri <- JSON.string(doc, "uri") if Url.is_wellformed_file(uri)
+            case Position(pos) <- JSON.value(params, "position")
+            ch <- JSON.string(params, "ch")
+            case FormattingOptions(format) <- JSON.value(params, "options")
+          } yield (id, Url.absolute_file(uri), pos, ch, format)
+        case _ => None
+      }
+
+    def reply(id: Id, edits: List[TextEdit]): JSON.T =
+      ResponseMessage(id, Some(edits.map(_.json)))
+  }
+
+  object RangeFormatting {
+    def unapply(json: JSON.T): Option[(Id, JFile, Line.Range, VSCode_Indent.Format)] =
+      json match {
+        case RequestMessage(id, "textDocument/rangeFormatting", Some(params)) =>
+          for {
+            doc <- JSON.value(params, "textDocument")
+            uri <- JSON.string(doc, "uri") if Url.is_wellformed_file(uri)
+            case Range(range) <- JSON.value(params, "range")
+            case FormattingOptions(format) <- JSON.value(params, "options")
+          } yield (id, Url.absolute_file(uri), range, format)
+        case _ => None
+      }
+
+    def reply(id: Id, edits: List[TextEdit]): JSON.T =
+      ResponseMessage(id, Some(edits.map(_.json)))
   }
 
 
@@ -800,6 +1058,52 @@ object LSP {
   }
 
 
+  /* query operations */
+
+  object Query_Operations_Request extends Notification0("PIDE/query_operations_request")
+
+  object Query_Operations_Response {
+    def apply(operations: List[String]): JSON.T =
+      Notification("PIDE/query_operations_response", JSON.Object("operations" -> operations))
+  }
+
+  object Query_Request {
+    def unapply(json: JSON.T): Option[(String, List[String])] =
+      json match {
+        case Notification("PIDE/query_request", Some(params)) =>
+          for {
+            operation <- JSON.string(params, "operation")
+            args <- JSON.strings(params, "args")
+          } yield (operation, args)
+        case _ => None
+      }
+  }
+
+  class Query_Operation_Notification(name: String) {
+    def unapply(json: JSON.T): Option[String] =
+      json match {
+        case Notification(method, Some(params)) if method == name =>
+          JSON.string(params, "operation")
+        case _ => None
+      }
+  }
+
+  object Query_Cancel extends Query_Operation_Notification("PIDE/query_cancel")
+  object Query_Locate extends Query_Operation_Notification("PIDE/query_locate")
+
+  object Query_Status {
+    def apply(operation: String, message: String): JSON.T =
+      Notification("PIDE/query_status",
+        JSON.Object("operation" -> operation, "message" -> message))
+  }
+
+  object Query_Output {
+    def apply(operation: String, content: String): JSON.T =
+      Notification("PIDE/query_output",
+        JSON.Object("operation" -> operation, "content" -> content))
+  }
+
+
   /* sledgehammer */
 
   object Sledgehammer_Provers_Request
@@ -840,4 +1144,205 @@ object LSP {
   object Sledgehammer_Cancel extends Notification0("PIDE/sledgehammer_cancel")
 
   object Sledgehammer_Locate extends Notification0("PIDE/sledgehammer_locate")
+
+  /*jobs: runs of their own, which go on while the text changes (VSCode_Sledgehammer). The
+    state is the one after the command at the position with at_command, as the panel shows
+    it; else the one before that command, or the goal it states, as for the agent's queries*/
+  sealed case class Sledgehammer_Job_Params(
+    id: String,
+    node_pos: Line.Node_Position,
+    at_command: Boolean,
+    goal: String,
+    subgoal: Int,
+    facts: String,
+    params: List[(String, String)],
+    stop_at_first: Boolean,
+    max_parallel: Int)
+
+  object Sledgehammer_Job_Start {
+    def unapply(json: JSON.T): Option[Sledgehammer_Job_Params] =
+      json match {
+        case Notification("PIDE/sledgehammer_job_start", Some(params)) =>
+          for {
+            id <- JSON.string(params, "id")
+            node_pos <- TextDocumentPosition.unapply(params)
+          } yield {
+            /*name, value, name, value ...*/
+            val pairs =
+              JSON.strings(params, "params").getOrElse(Nil).grouped(2).collect({
+                case List(a, b) => (a, b) }).toList
+            Sledgehammer_Job_Params(id, node_pos,
+              JSON.bool(params, "at_command").getOrElse(false),
+              JSON.string(params, "goal").getOrElse(""),
+              JSON.int(params, "subgoal").getOrElse(1),
+              JSON.string(params, "facts").getOrElse(""),
+              pairs,
+              JSON.bool(params, "stop_at_first").getOrElse(true),
+              JSON.int(params, "max_parallel").getOrElse(2))
+          }
+        case _ => None
+      }
+  }
+
+  object Sledgehammer_Job_Cancel {
+    def unapply(json: JSON.T): Option[String] =
+      json match {
+        case Notification("PIDE/sledgehammer_job_cancel", Some(params)) =>
+          JSON.string(params, "id")
+        case _ => None
+      }
+  }
+
+  /*status: queued, starting, running, finished, cancelled or error; with a message of the
+    run, as XML, and the proofs in it as they would be inserted; once running, the range of
+    the command whose state it works on*/
+  object Sledgehammer_Job_Update {
+    def apply(
+      id: String,
+      status: String,
+      message: String = "",
+      proofs: List[String] = Nil,
+      outcome: String = "",
+      error: String = "",
+      range: Option[Line.Range] = None
+    ): JSON.T =
+      Notification("PIDE/sledgehammer_job_update",
+        JSON.Object("id" -> id, "status" -> status) ++
+        JSON.optional("range" -> range.map(Range(_))) ++
+        JSON.optional("message" -> proper_string(message)) ++
+        (if (proofs.isEmpty) JSON.Object.empty else JSON.Object("proofs" -> proofs)) ++
+        JSON.optional("outcome" -> proper_string(outcome)) ++
+        JSON.optional("error" -> proper_string(error)))
+  }
+
+
+  /* graphview */
+
+  object Graphview_Request extends Notification0("PIDE/graphview_request")
+
+  object Graphview_Response {
+    def apply(graph: Option[JSON.Object.T], error: Option[String]): JSON.T =
+      Notification("PIDE/graphview_response",
+        JSON.Object() ++ JSON.optional("graph" -> graph) ++ JSON.optional("error" -> error))
+  }
+
+
+  /* infoview */
+
+  object Infoview_Request extends Notification0("PIDE/infoview_request")
+
+  object Infoview_Pin {
+    def unapply(json: JSON.T): Option[(Long, JFile, Line.Position)] =
+      json match {
+        case Notification("PIDE/infoview_pin", Some(params)) =>
+          for {
+            id <- JSON.long(params, "id")
+            uri <- JSON.string(params, "uri") if Url.is_wellformed_file(uri)
+            pos <- Position.unapply(params)
+          } yield (id, Url.absolute_file(uri), pos)
+        case _ => None
+      }
+  }
+
+  object Infoview_Unpin {
+    def unapply(json: JSON.T): Option[Long] =
+      json match {
+        case Notification("PIDE/infoview_unpin", Some(params)) => JSON.long(params, "id")
+        case _ => None
+      }
+  }
+
+  object Infoview_Set_Margin {
+    def unapply(json: JSON.T): Option[Double] =
+      json match {
+        case Notification("PIDE/infoview_set_margin", Some(params)) =>
+          JSON.double(params, "margin")
+        case _ => None
+      }
+  }
+
+  object Infoview_Response {
+    def apply(live: Option[JSON.Object.T], pins: List[JSON.Object.T]): JSON.T =
+      Notification("PIDE/infoview_response",
+        JSON.Object("pins" -> pins) ++ JSON.optional("live" -> live))
+  }
+
+
+  /* simplifier trace */
+
+  object Simplifier_Trace_Request extends Notification0("PIDE/simplifier_trace_request")
+  object Simplifier_Trace_Clear_Memory extends Notification0("PIDE/simplifier_trace_clear_memory")
+  object Simplifier_Trace_Show extends Notification0("PIDE/simplifier_trace_show")
+
+  object Simplifier_Trace_Auto_Update {
+    def unapply(json: JSON.T): Option[Boolean] =
+      json match {
+        case Notification("PIDE/simplifier_trace_auto_update", Some(params)) =>
+          JSON.bool(params, "enabled")
+        case _ => None
+      }
+  }
+
+  object Simplifier_Trace_Reply {
+    def unapply(json: JSON.T): Option[(Long, String)] =
+      json match {
+        case Notification("PIDE/simplifier_trace_reply", Some(params)) =>
+          for {
+            serial <- JSON.long(params, "serial")
+            answer <- JSON.string(params, "answer")
+          } yield (serial, answer)
+        case _ => None
+      }
+  }
+
+  object Simplifier_Trace_Response {
+    def apply(
+      auto_update: Boolean,
+      pending: Int,
+      question: Option[JSON.Object.T]
+    ): JSON.T =
+      Notification("PIDE/simplifier_trace_response",
+        JSON.Object(
+          "auto_update" -> auto_update,
+          "pending" -> pending) ++
+        JSON.optional("question" -> question))
+  }
+
+  object Simplifier_Trace_Full {
+    def apply(entries: List[JSON.Object.T]): JSON.T =
+      Notification("PIDE/simplifier_trace_full", JSON.Object("entries" -> entries))
+  }
+
+
+  /* theories: status and timing */
+
+  object Theories_Request extends Notification0("PIDE/theories_request")
+
+  object Theories_Set_Threshold {
+    def unapply(json: JSON.T): Option[Double] =
+      json match {
+        case Notification("PIDE/theories_set_threshold", Some(params)) =>
+          JSON.double(params, "threshold")
+        case _ => None
+      }
+  }
+
+  object Theories_Response {
+    def apply(
+      phase: String,
+      loading: Boolean,
+      threshold: Double,
+      current: Option[String],
+      nodes: List[JSON.Object.T],
+      commands: List[JSON.Object.T]
+    ): JSON.T =
+      Notification("PIDE/theories_response",
+        JSON.Object(
+          "phase" -> phase,
+          "loading" -> loading,
+          "threshold" -> threshold,
+          "nodes" -> nodes,
+          "commands" -> commands) ++
+        JSON.optional("current" -> current))
+  }
 }

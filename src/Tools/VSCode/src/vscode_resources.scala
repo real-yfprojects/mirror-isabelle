@@ -76,6 +76,9 @@ extends Resources(session_background, session_background, log = log_file) {
 
   private val state = Synchronized(VSCode_Resources.State())
 
+  val completion_cache: Synchronized[Option[VSCode_Rendering.Semantic_Cache]] =
+    Synchronized(None)
+
 
   /* options */
 
@@ -268,6 +271,35 @@ extends Resources(session_background, session_background, log = log_file) {
   }
 
 
+  /* load theories: required, like those ticked in the Theories panel of Isabelle/jEdit, so
+     that the prover checks them although no open theory imports them */
+
+  def load_theories(
+    session: VSCode_Session,
+    editor: Language_Server.Editor,
+    files: List[JFile],
+    file_watcher: File_Watcher
+  ): Boolean = {
+    state.change_result { st =>
+      val loaded_models =
+        (for {
+          file <- files.iterator
+          if !st.models.isDefinedAt(file)
+          name = node_name(file)
+          if name.is_theory && !loaded_theory(name)
+          text <- { file_watcher.register_parent(file); read_file_content(name) }
+        }
+        yield {
+          val model = VSCode_Model.init(session, editor, name)
+          val model1 = (model.change_text(text) getOrElse model).external(true)
+          (file, model1.copy(node_required = true))
+        }).toList
+
+      (loaded_models.nonEmpty, st.update_models(loaded_models))
+    }
+  }
+
+
   /* pending input */
 
   def flush_input(session: VSCode_Session, channel: Channel): Unit = {
@@ -345,6 +377,33 @@ extends Resources(session_background, session_background, log = log_file) {
     output_text(Pretty.string_of(body, margin = margin, metric = Symbol.Metric))
   def output_pretty_tooltip(body: XML.Body): String = output_pretty(body, tooltip_margin)
   def output_pretty_message(body: XML.Body): String = output_pretty(body, message_margin)
+
+  /*a tooltip for a hover in Markdown that may contain HTML: laid out like the plain text, in
+    a <pre> block, with each name that has a definition linked to it*/
+  def html_pretty_tooltip(body: XML.Body, link: Properties.T => Option[String]): String = {
+    def escape(s: String): String =
+      s.flatMap {
+        case '&' => "&amp;"
+        case '<' => "&lt;"
+        case '>' => "&gt;"
+        case '"' => "&quot;"
+        case c => c.toString
+      }
+    def html(tree: XML.Tree): String =
+      tree match {
+        case XML.Wrapped_Elem(_, _, body) => body.map(html).mkString
+        case XML.Elem(Markup(Markup.ENTITY, props), body) =>
+          val text = body.map(html).mkString
+          link(props) match {
+            case Some(href) => "<a href=\"" + escape(href) + "\">" + text + "</a>"
+            case None => text
+          }
+        case XML.Elem(_, body) => body.map(html).mkString
+        case XML.Text(text) => escape(output_text(text))
+      }
+    val formatted = Pretty.formatted(body, margin = tooltip_margin, metric = Symbol.Metric)
+    "<pre><code>" + formatted.map(html).mkString + "</code></pre>"
+  }
 
 
   /* caret handling */

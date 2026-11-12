@@ -4,7 +4,12 @@ main = isabelle.jedit.JEdit_Main
 resources = \
   lib/services/java.nio.charset.spi.CharsetProvider:META-INF/services/ \
   lib/logo/isabelle_transparent-32.gif:isabelle/ \
-  lib/logo/isabelle_transparent.gif:isabelle/
+  lib/logo/isabelle_transparent.gif:isabelle/ \
+  src/Tools/VSCode/src/vscode_completion.ML:isabelle/vscode/ \
+  src/Tools/VSCode/src/vscode_sledgehammer.ML:isabelle/vscode/ \
+  src/Tools/VSCode/src/vscode_skeletons.ML:isabelle/vscode/ \
+  src/Tools/VSCode/src/vscode_hover.ML:isabelle/vscode/ \
+  src/Tools/VSCode/src/vscode_agent.ML:isabelle/vscode/
 sources = \
   src/HOL/SPARK/Tools/spark.scala \
   src/HOL/Tools/ATP/system_on_tptp.scala \
@@ -296,13 +301,24 @@ sources = \
   src/Tools/VSCode/src/pretty_text_panel.scala \
   src/Tools/VSCode/src/preview_panel.scala \
   src/Tools/VSCode/src/state_panel.scala \
+  src/Tools/VSCode/src/vscode_agent.scala \
+  src/Tools/VSCode/src/vscode_context_names.scala \
+  src/Tools/VSCode/src/vscode_entities.scala \
+  src/Tools/VSCode/src/vscode_hover_info.scala \
   src/Tools/VSCode/src/vscode_main.scala \
   src/Tools/VSCode/src/vscode_model.scala \
+  src/Tools/VSCode/src/vscode_query.scala \
   src/Tools/VSCode/src/vscode_rendering.scala \
   src/Tools/VSCode/src/vscode_resources.scala \
   src/Tools/VSCode/src/vscode_session.scala \
   src/Tools/VSCode/src/vscode_sledgehammer.scala \
+  src/Tools/VSCode/src/vscode_graphview.scala \
+  src/Tools/VSCode/src/vscode_indent.scala \
+  src/Tools/VSCode/src/vscode_infoview.scala \
+  src/Tools/VSCode/src/vscode_simplifier_trace.scala \
+  src/Tools/VSCode/src/vscode_skeletons.scala \
   src/Tools/VSCode/src/vscode_spell_checker.scala \
+  src/Tools/VSCode/src/vscode_theories.scala \
   src/Tools/jEdit/src/active.scala \
   src/Tools/jEdit/src/base_plugin.scala \
   src/Tools/jEdit/src/completion_popup.scala \

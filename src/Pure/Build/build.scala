@@ -751,10 +751,21 @@ Usage: isabelle build_worker [OPTIONS]
   ): Option[Document.Snapshot] = {
     def recode(str: String): String = Symbol.output(unicode_symbols, str)
 
+    /* Session sources are stored as raw file bytes, but PIDE editors hold buffers with
+       normalized line endings, and Markup_Tree.from_XML derives its offsets from the
+       character length of this very text. Source and markup must therefore be
+       normalized together: normalizing neither leaves a CRLF theory shifted against the
+       editor by one character per preceding line, and normalizing only one of them
+       shifts the markup against its own source. */
+    def decode_text(str: String): String = Line.normalize(recode(str))
+
     def read(name: String): Export.Entry = theory_context(name, permissive = true)
 
+    /* Normalized as one stream rather than via recode, which is applied per chunk and
+       would not see a line ending split across a markup boundary. */
     def read_xml(name: String): XML.Body =
-      YXML.parse_body(read(name).bytes, recode = recode, cache = theory_context.cache)
+      YXML.parse_body(YXML.Source(Line.normalize(read(name).bytes.text)),
+        recode = recode, cache = theory_context.cache)
 
     def read_source_file(name: String): Store.Source_File =
       theory_context.session_context.source_file(name)
@@ -773,7 +784,7 @@ Usage: isabelle build_worker [OPTIONS]
 
           val file = read_source_file(name0)
           val bytes = file.bytes
-          val text = recode(bytes.text)
+          val text = decode_text(bytes.text)
           val chunk = Symbol.Text_Chunk(text)
           val content = Some((file.digest, chunk))
 
@@ -781,7 +792,7 @@ Usage: isabelle build_worker [OPTIONS]
             Document.Blobs.Item(bytes, text, chunk, command_offset = command_offset)
         }
 
-      val thy_source = recode(read_source_file(thy_file0).bytes.text)
+      val thy_source = decode_text(read_source_file(thy_file0).bytes.text)
       val thy_xml = read_xml(Export.MARKUP)
       val blobs_xml =
         for (i <- (1 to blobs.length).toList)
