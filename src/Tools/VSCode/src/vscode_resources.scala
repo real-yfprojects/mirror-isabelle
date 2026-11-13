@@ -155,9 +155,13 @@ extends Resources(session_background, session_background, log = log_file) {
 
   /* file content */
 
+  /*as the file is, without Symbol.decode (Isabelle2026 571930f151 decodes): this client
+    keeps its editors in Isabelle's ASCII encoding, so a decoded copy of a file it opens
+    later differs from the editor's text -- the prover checks the theory again from the
+    first symbol -- and line positions into files not open would count decoded columns*/
   def read_file_content(name: Document.Node.Name): Option[String] = {
     make_theory_content(name) orElse {
-      try { Some(Symbol.decode(Line.normalize(File.read(node_file(name))))) }
+      try { Some(Line.normalize(File.read(node_file(name)))) }
       catch { case ERROR(_) => None }
     }
   }
