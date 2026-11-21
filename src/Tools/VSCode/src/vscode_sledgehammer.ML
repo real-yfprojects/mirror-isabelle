@@ -59,7 +59,7 @@ val operation = "\
   So the results cannot be results of the command, which may be gone by then: they go out
   as protocol messages, read by VSCode_Sledgehammer.Jobs.
 
-  Arguments: the job's id, a goal of its own (stated with "have" in a proof, "lemma"
+  Arguments: the job's id, a goal of its own ("have" in a proof, after "proof -" by apply; "lemma"
   outside one, as for the agent's candidates), the subgoal, a fact override as inside the
   parentheses of the sledgehammer command ("add: foo del: bar", or bare facts for only),
   then pairs of Sledgehammer parameters*)
@@ -75,7 +75,10 @@ val job_operation = "\
 \    | open_goal st goal =\n\
 \        let\n\
 \          val thy = Toplevel.theory_of st;\n\
-\          val text = (if Toplevel.is_proof st then \"have \" else \"lemma \") ^ goal;\n\
+\          val text =\n\
+\            (if not (Toplevel.is_proof st) then \"lemma \"\n\
+\             else if can (Proof.assert_backward o Toplevel.proof_of) st then \"proof - have \"\n\
+\             else \"have \") ^ goal;\n\
 \        in\n\
 \          fold Toplevel.command_exception\n\
 \            (Outer_Syntax.parse_text thy (K {skip_theory = false, theory = thy}) Position.none text) st\n\

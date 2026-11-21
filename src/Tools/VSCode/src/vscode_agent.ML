@@ -7,6 +7,10 @@ Each candidate is Isar text -- a terminal proof, apply steps, a whole proof bloc
 diagnostic command like thm or find_theorems -- run on the state with a timeout of its own.
 The goal is the state's own, or one the agent states: "have" in a proof, "lemma" outside one.
 
+A candidate may outline a proof with sorry: it then comes back with the goals each sorry
+skips, the holes the agent fills in next. Each step of a candidate is timed, and the slowest
+steps of a candidate of several are reported, so that slow proofs show before they are written.
+
 A candidate runs in a thread of its own rather than in the query's worker: outside a worker
 task Future.proofs_enabled is false, so "by" does not fork its proof and an error surfaces
 within the candidate, which can then be given a timeout and its own output. That output --
@@ -255,42 +259,107 @@ fun pretty_state st = Pretty.pure_string_of (Pretty.chunks (Toplevel.pretty_stat
 
 exception CANDIDATE of string;
 
-(*the state after the text, and the names of its commands*)
-fun run_text st text =
+fun is_sorry name = name = "sorry" orelse name = "\092<proof>";
+
+(*a sorry outlines a proof that the agent fills in later; the cheating it does needs
+  interactive mode, which a candidate's thread is not in*)
+fun run_command tr st =
+  if is_sorry (Toplevel.name_of tr) then Interactive.setmp true (Toplevel.command_exception tr) st
+  else Toplevel.command_exception tr st;
+
+(*the source of a step: from its command to the next one, as far as its first line*)
+fun step_source syms offsets i =
+  let
+    val start = nth offsets i;
+    val stop = if i + 1 < length offsets then nth offsets (i + 1) else length syms + 1;
+    val text = implode (take (stop - start) (drop (start - 1) syms));
+    val line = the_default text (Option.map #1 (first_field "\n" text));
+    val line' = Symbol.trim_blanks line;
+  in if size line' > 80 then String.substring (line', 0, 77) ^ "..." else line' end;
+
+type run =
+  {state: Toplevel.state, names: string list,
+   holes: Properties.T list, steps: (Properties.T * Time.time) list};
+
+(*the state after the text, the names of its commands, the holes that its sorrys leave
+  (their line in the text and the goals they skip), and the time of each step*)
+fun run_text st text : run =
   let
     val thy = Toplevel.theory_of st;
-    val trs = Outer_Syntax.parse_text thy (K {skip_theory = false, theory = thy}) Position.none text;
+    val trs =
+      Outer_Syntax.parse_text thy (K {skip_theory = false, theory = thy}) Position.start text
+      |> filter_out Toplevel.is_ignored;
     val names = map Toplevel.name_of trs;
     val _ = if null trs then raise CANDIDATE "empty text" else ();
     val _ =
-      if exists (member (op =) ["sorry", "oops", "\092<proof>"]) names
-      then raise CANDIDATE "skips the proof (sorry or oops)" else ();
-    fun step tr st =
-      Toplevel.command_exception tr st
-        handle Runtime.EXCURSION_FAIL (exn, _) =>
-          raise CANDIDATE (cat_lines (map (content o #2 o #1) (Runtime.exn_messages exn)));
-  in (fold step trs st, names) end;
+      if member (op =) names "oops"
+      then raise CANDIDATE "gives the proof up (oops)" else ();
+    val syms = Symbol.explode text;
+    val offsets =
+      map_index (fn (i, tr) =>
+        the_default (if i = 0 then 1 else size text) (Position.offset_of (Toplevel.pos_of tr)))
+        trs;
+    fun line_of tr = string_of_int (the_default 1 (Position.line_of (Toplevel.pos_of tr)));
+    fun step (i, tr) (st, holes, steps) =
+      let
+        val holes' =
+          if is_sorry (Toplevel.name_of tr)
+          then [("line", line_of tr), ("goals", pretty_state st)] :: holes
+          else holes;
+        val start = Timing.start ();
+        val st' =
+          run_command tr st
+            handle Runtime.EXCURSION_FAIL (exn, _) =>
+              raise CANDIDATE (cat_lines (map (content o #2 o #1) (Runtime.exn_messages exn)));
+        val props =
+          [("line", line_of tr), ("command", Toplevel.name_of tr),
+           ("source", step_source syms offsets i)];
+      in (st', holes', (props, #elapsed (Timing.result start)) :: steps) end;
+    val (st', holes, steps) = fold step (map_index I trs) (st, [], []);
+  in {state = st', names = names, holes = rev holes, steps = rev steps} end;
+
+(*how a goal of one's own is stated: "have" in a proof, after "proof -" where the proof goes on
+  by apply, which takes no "have"; "lemma" outside a proof*)
+fun goal_keyword st =
+  if not (Toplevel.is_proof st) then "lemma "
+  else if can (Proof.assert_backward o Toplevel.proof_of) st then "proof - have "
+  else "have ";
 
 (*Opens the agent's goal: "have" in a proof, "lemma" outside one; the statement is passed
   ready to follow the keyword*)
 fun open_goal st "" = st
   | open_goal st stmt =
-      #1 (run_text st ((if Toplevel.is_proof st then "have " else "lemma ") ^ stmt));
+      #state (run_text st (goal_keyword st ^ stmt));
 
 fun no_subgoals st =
   (case try (Thm.nprems_of o #goal o Proof.goal o Toplevel.proof_of) st of
     SOME 0 => true
   | _ => false);
 
-fun outcome keywords st_goal (st', names) =
+fun outcome keywords st_goal ({state = st', names, holes, ...}: run) =
   if forall (fn name => Keyword.command_kind keywords name = Keyword.diag) names then ("output", "")
   else if not (Toplevel.is_proof st_goal) then ("ok", "")
   else if not (Toplevel.is_proof st') orelse Toplevel.proof_level st' < Toplevel.proof_level st_goal
-  then ("proved", "")
+  then (if null holes then "proved" else "proved_with_sorry", "")
   else if no_subgoals st' then ("no_subgoals", pretty_state st')
   else ("goals_left", pretty_state st');
 
+(*the outcomes after which there is a state to go on from*)
+fun has_state kind =
+  member (op =) ["proved", "proved_with_sorry", "goals_left", "no_subgoals", "ok"] kind;
+
 fun ms t = string_of_int (Time.toMilliseconds t);
+
+(*the steps of a text of several that took longest, slowest first*)
+val slow_step = Time.fromMilliseconds 100;
+fun slow_steps (steps: (Properties.T * Time.time) list) =
+  if length steps < 2 then []
+  else
+    steps
+    |> filter (fn (_, t) => Time.>= (t, slow_step))
+    |> sort (fn ((_, a), (_, b)) => Time.compare (b, a))
+    |> take 3
+    |> map (fn (props, t) => props @ [("time_ms", ms t)]);
 
 (*one candidate, in the current thread, with its output going to the agent*)
 fun run_candidate st_goal timeout traced watch text =
@@ -306,37 +375,40 @@ fun run_candidate st_goal timeout traced watch text =
     val res =
       Thread_Data.setmp sink_var (SOME sink) (fn () =>
         Exn.capture_body (fn () =>
-          Timeout.apply timeout (fn () => outcome keywords st_goal (run_text st0 text)) ())) ();
+          Timeout.apply timeout (fn () =>
+            let val run = run_text st0 text
+            in (outcome keywords st_goal run, run) end) ())) ();
     val elapsed = #elapsed (Timing.result start);
-    val (kind, text') =
+    val ((kind, text'), holes, slow, reached) =
       (case res of
-        Exn.Res r => r
-      | Exn.Exn (CANDIDATE msg) => ("error", msg)
-      | Exn.Exn (Timeout.TIMEOUT _) => ("timeout", "")
+        Exn.Res (r, run: run) => (r, #holes run, slow_steps (#steps run), SOME (#state run))
+      | Exn.Exn (CANDIDATE msg) => (("error", msg), [], [], NONE)
+      | Exn.Exn (Timeout.TIMEOUT _) => (("timeout", ""), [], [], NONE)
       | Exn.Exn exn =>
           if Exn.is_interrupt exn then Exn.reraise exn
-          else ("error", content (Runtime.exn_message exn)));
+          else (("error", content (Runtime.exn_message exn)), [], [], NONE));
     val (stats, cycle, steps, more) =
       (case trace of SOME (_, result) => result () | NONE => ([], [], [], 0));
   in
-    ([("text", text), ("outcome", kind), ("time_ms", ms elapsed), ("state", text'),
-      ("output", get_output ()), ("traced", if traced then "true" else ""),
-      ("more_steps", string_of_int more)], (stats, (cycle, steps)))
+    (([("text", text), ("outcome", kind), ("time_ms", ms elapsed), ("state", text'),
+       ("output", get_output ()), ("traced", if traced then "true" else ""),
+       ("more_steps", string_of_int more)], (stats, (cycle, (steps, (holes, slow))))),
+     if has_state kind then reached else NONE)
   end;
 
 (*a candidate that timed out untraced runs once more with the trace on, for its statistics*)
 fun try_candidate st_goal timeout stats watch text =
   let
     val traced = stats orelse is_some watch;
-    val res as (props, _) = run_candidate st_goal timeout traced watch text;
+    val res as ((props, _), reached) = run_candidate st_goal timeout traced watch text;
   in
     if not traced andalso Properties.get props "outcome" = SOME "timeout" andalso
       Toplevel.is_proof st_goal
     then
       let
         val timeout' = if Time.< (timeout, seconds 5.0) then timeout else seconds 5.0;
-        val (_, rest) = run_candidate st_goal timeout' true NONE text;
-      in (Properties.put ("traced", "rerun") props, rest) end
+        val ((_, rest), _) = run_candidate st_goal timeout' true NONE text;
+      in ((Properties.put ("traced", "rerun") props, rest), reached) end
     else res
   end;
 
@@ -362,11 +434,113 @@ fun parallel n fs =
   in batch fs end;
 
 
+(** handles: the states that candidates reached, to go on from **)
+
+(*a state, and the root of its chain -- the state the agent's first call started from, at a
+  line of the theory -- at which a goal left in the state is stated again*)
+type stored = {state: Toplevel.state, root: Toplevel.state};
+
+val max_handles = 256;
+
+(*by number, the oldest dropped first*)
+val handles = Synchronized.var "vscode_agent_handles" (Inttab.empty: stored Inttab.table, 0);
+
+fun store_handle (h: stored) =
+  Synchronized.change_result handles (fn (tab, n) =>
+    let val n' = n + 1
+    in ("h" ^ string_of_int n',
+      (tab |> Inttab.update (n', h) |> Inttab.delete_safe (n' - max_handles), n'))
+    end);
+
+fun lookup_handle id =
+  (case (if String.isPrefix "h" id then Int.fromString (unprefix "h" id) else NONE) of
+    SOME n => Inttab.lookup (#1 (Synchronized.value handles)) n
+  | NONE => NONE);
+
+
+(* goals stated again at the root *)
+
+fun print_term ctxt t = Pretty.pure_string_of (Syntax.pretty_term ctxt t);
+
+(*the text that reads back as the term, with types shown if it takes them; or as a more
+  general term, where reading gives a type nothing in the text fixes -- the second [] of
+  "length ([] @ ys) = length ys + length []" -- a type variable of its own. That is as
+  good for a statement, but not for a literal fact, which must match a fact*)
+fun reparsable {general} ctxt t =
+  let
+    val thy = Proof_Context.theory_of ctxt;
+    val tfrees = Term.add_tfrees t [];
+    fun generalize t' =
+      t' |> Term.map_types (Term.map_type_tfree (fn v as (a, S) =>
+        if member (op =) tfrees v then raise Same.SAME else TVar ((a, 0), S)));
+    fun reads s =
+      (case try (Syntax.read_prop ctxt) s of
+        SOME t' => t' aconv t orelse general andalso Pattern.matches thy (generalize t', t)
+      | NONE => false);
+    val plain = print_term ctxt t;
+    val typed = print_term (Config.put show_types true ctxt) t;
+  in
+    if reads plain then SOME plain
+    else if reads typed then SOME typed
+    else NONE
+  end;
+
+(*the facts and assumptions of a context that the root did not have: what the chain added, by
+  obtain, assume, case, have*)
+fun new_premises ctxt0 ctxt =
+  let
+    val assms0 = map Thm.term_of (Assumption.all_assms_of ctxt0);
+    val assms = map Thm.term_of (Assumption.all_assms_of ctxt);
+    val facts0 = Proof_Context.facts_of ctxt0;
+    val facts = Proof_Context.facts_of ctxt;
+    val named = Facts.dest_static false [facts0] facts |> maps (map Thm.prop_of o #2);
+    fun this_of c = map Thm.prop_of (the_default [] (try (Proof_Context.get_fact c) (Facts.named "this")));
+    val this0 = this_of ctxt0;
+    val this = filter_out (member (op aconv) this0) (this_of ctxt);
+  in
+    distinct (op aconv) (filter_out (member (op aconv) assms0) assms @ named @ this)
+    |> filter_out (fn t => t aconv Logic.true_prop)
+  end;
+
+val max_statements = 8;
+
+(*each subgoal of the state as a statement at the root: the variables fixed since the root
+  bound by \<And>, the facts added since then as premises -- and how to use those facts when
+  a proof of the statement is tried in the state*)
+fun closed_statements root st =
+  (case try (#goal o Proof.goal o Toplevel.proof_of) st of
+    NONE => ([], "")
+  | SOME goal =>
+      let
+        val ctxt0 = Toplevel.context_of root;
+        val ctxt = Toplevel.context_of st;
+        val prems = new_premises ctxt0 ctxt;
+        fun close t =
+          let
+            val prop = Logic.list_implies (prems, t);
+            val frees = rev (filter_out (Variable.is_fixed ctxt0 o #1) (Term.add_frees prop []));
+            val prop' =
+              fold_rev (fn (x, T) => fn p =>
+                Logic.all_const T $ Term.lambda_name (Variable.revert_fixed ctxt x, Free (x, T)) p)
+              frees prop;
+          in
+            (case reparsable {general = true} ctxt0 prop' of
+              SOME s => [("statement", s)]
+            | NONE => [("error", "it does not print so that it reads back the same")])
+          end;
+        val literals = map (reparsable {general = false} ctxt) prems;
+        val using =
+          if null prems orelse exists is_none literals then ""
+          else "using " ^ space_implode " " (map (fn s => "\092<open>" ^ the s ^ "\092<close>") literals);
+      in (map close (take max_statements (Thm.prems_of goal)), using) end);
+
+
 (** arguments and result **)
 
-(*plain strings, as overlays pass them on: goal, timeout in ms, "true" for statistics,
-  watch limit, then three counted lists -- candidates, watched rules, watched patterns*)
-fun decode_args (goal :: timeout_ms :: stats :: watch_limit :: rest) =
+(*plain strings, as overlays pass them on: the handle to start from (or ""), goal, timeout in
+  ms, "true" for statistics, watch limit, then three counted lists -- candidates, watched
+  rules, watched patterns*)
+fun decode_args (from :: goal :: timeout_ms :: stats :: watch_limit :: rest) =
       let
         fun counted (n :: xs) =
               (case Int.fromString n of
@@ -378,7 +552,7 @@ fun decode_args (goal :: timeout_ms :: stats :: watch_limit :: rest) =
         val (patterns, _) = counted rest2;
         val limit = the_default 0 (Int.fromString watch_limit);
       in
-        {goal = goal,
+        {from = from, goal = goal,
          timeout = Time.fromMilliseconds (the_default 10000 (Int.fromString timeout_ms)),
          stats = stats = "true",
          watch =
@@ -393,25 +567,221 @@ fun encode_result (header, candidates) =
     YXML.string_of_body
       (pair properties
         (list (pair properties (pair (list (pair string (pair int int)))
-          (pair (list string) (list properties))))) (header, candidates))
+          (pair (list string) (pair (list properties)
+            (pair (list properties) (pair (list properties) (list properties))))))))
+        (header, candidates))
   end;
 
-fun try_all state {goal, timeout, stats, watch, candidates} =
-  (case Exn.capture_body (fn () => open_goal state goal) of
-    Exn.Res st_goal =>
+(*how a proof goes on from a state: by "apply" in prove mode, by "show" in an Isar proof body*)
+fun mode st =
+  if can (Proof.assert_backward o Toplevel.proof_of) st then "prove" else "state";
+
+(*a candidate's result with the handle of the state it reached, and for goals left there each
+  stated again at the root*)
+fun with_handle root ((props, (stats, (cycle, (steps, (holes, slow))))), reached) =
+  (case reached of
+    NONE => (props, (stats, (cycle, (steps, (holes, (slow, []))))))
+  | SOME st =>
       let
-        val _ = ensure_capture ();
-        val results =
-          parallel 4 (map (fn text => fn () => try_candidate st_goal timeout stats watch text)
-            candidates);
-        val header =
-          [("state", if Toplevel.is_proof st_goal then pretty_state st_goal else ""),
-           ("proof", if Toplevel.is_proof st_goal then "true" else "")];
-      in (header, results) end
-  | Exn.Exn (CANDIDATE msg) => ([("error", "The goal could not be stated: " ^ msg)], [])
-  | Exn.Exn exn =>
-      if Exn.is_interrupt exn then Exn.reraise exn
-      else ([("error", content (Runtime.exn_message exn))], []));
+        val id = store_handle {state = st, root = root};
+        val (statements, using) =
+          if Properties.get props "outcome" = SOME "goals_left"
+          then the_default ([], "") (try (closed_statements root) st)
+          else ([], "");
+      in
+        (props @ [("handle", id), ("using", using), ("mode", mode st)],
+          (stats, (cycle, (steps, (holes, (slow, statements))))))
+      end);
+
+fun try_all state {from, goal, timeout, stats, watch, candidates} =
+  let
+    val start =
+      if from = "" then Exn.Res {state = state, root = state}
+      else
+        (case lookup_handle from of
+          SOME h => Exn.Res h
+        | NONE =>
+            Exn.Exn (CANDIDATE ("There is no handle " ^ from ^
+              " (any more): handles last until 256 newer ones are made, or the prover " ^
+              "restarts. Start again from a line.")));
+  in
+    (case start of
+      Exn.Exn (CANDIDATE msg) => ([("error", msg)], [])
+    | Exn.Exn exn => Exn.reraise exn
+    | Exn.Res {state = st0, root} =>
+        (case Exn.capture_body (fn () => open_goal st0 goal) of
+          Exn.Res st_goal =>
+            let
+              val _ = ensure_capture ();
+              val results =
+                parallel 4 (map (fn text => fn () => try_candidate st_goal timeout stats watch text)
+                  candidates);
+              val goal_handle = if goal = "" then "" else store_handle {state = st_goal, root = root};
+              val header =
+                [("state", if Toplevel.is_proof st_goal then pretty_state st_goal else ""),
+                 ("proof", if Toplevel.is_proof st0 then "true" else ""),
+                 ("goal_handle", goal_handle), ("goal_keyword", goal_keyword st0)];
+            in (header, map (with_handle root) results) end
+        | Exn.Exn (CANDIDATE msg) => ([("error", "The goal could not be stated: " ^ msg)], [])
+        | Exn.Exn exn =>
+            if Exn.is_interrupt exn then Exn.reraise exn
+            else ([("error", content (Runtime.exn_message exn))], [])))
+  end;
+
+
+(** context: what the agent needs to know about a goal **)
+
+val max_section = 8000;
+val max_consts = 12;
+val max_rules = 8;
+
+fun bounded s =
+  if size s > max_section then String.substring (s, 0, max_section) ^ "\n..." else s;
+
+fun print_typ ctxt T = Pretty.pure_string_of (Syntax.pretty_typ ctxt T);
+
+(*the fact a specification's rules go by, if there is one by that name: its name for a
+  definition, NAME.simps for a fun or primrec, NAME.intros for an inductive predicate*)
+fun spec_fact_name ctxt ({name, rough_classification, ...}: Spec_Rules.spec_rule) =
+  let
+    val short =
+      (case Long_Name.explode name of
+        _ :: (rest as _ :: _) => Long_Name.implode rest
+      | _ => name);
+    val candidates =
+      if name = "" then []
+      else if String.isSuffix "_def" name then [short]
+      else if Spec_Rules.is_equational rough_classification then [short ^ ".simps"]
+      else if Spec_Rules.is_inductive rough_classification orelse
+        Spec_Rules.is_co_inductive rough_classification then [short ^ ".intros"]
+      else [];
+    fun resolves n = is_some (try (Proof_Context.get_fact ctxt) (Facts.named n));
+  in find_first resolves candidates end;
+
+(*the constants of the terms that have a specification -- this theory's first, then in the
+  order they occur -- each with its rules, taken at the type it has there*)
+fun definitions ctxt ts =
+  let
+    val thy_name = Context.theory_base_name (Proof_Context.theory_of ctxt);
+    val consts =
+      fold Term.add_consts ts [] |> rev |> distinct (fn ((a, _), (b, _)) => a = b);
+    val (own, other) = List.partition (fn (c, _) => Long_Name.qualifier c = thy_name) consts;
+    (*an overloaded constant has a specification per instance: those of this type; a type
+      class operation's are the instances' definitions, which do not help with a goal*)
+    fun of_type T (spec: Spec_Rules.spec_rule) =
+      not (null (#rules spec)) andalso
+      exists (fn Const (_, T') => Type.could_unify (T', T) | _ => false) (#terms spec);
+    fun entry (c, T) =
+      if String.isSubstring "_class." c then NONE
+      else
+      (case filter (of_type T) (Spec_Rules.retrieve ctxt (Const (c, T))) of
+        [] => NONE
+      | specs => SOME (c, T, specs));
+    fun spec_text (spec: Spec_Rules.spec_rule) =
+      let
+        val rules = #rules spec;
+        val shown = map (print_term ctxt o Thm.prop_of) (take max_rules rules);
+        val more = length rules - max_rules;
+      in
+        (case spec_fact_name ctxt spec of
+          SOME n => "  by " ^ n ^ ":\n"
+        | NONE => "") ^
+        cat_lines (map (prefix "    ") (maps split_lines shown)) ^
+        (if more > 0 then "\n    ... and " ^ string_of_int more ^ " more" else "")
+      end;
+    fun text (c, T, specs) =
+      Long_Name.base_name c ^ " :: " ^ print_typ ctxt T ^ "\n" ^ cat_lines (map spec_text specs);
+  in
+    map_filter entry (own @ other) |> take max_consts |> map text |> space_implode "\n\n"
+  end;
+
+(*the variables of the terms with their types, and the facts of the proof*)
+fun local_facts ctxt ts =
+  let
+    val frees = fold Term.add_frees ts [] |> rev |> distinct (op =);
+    fun name x = if Variable.is_fixed ctxt x then Variable.revert_fixed ctxt x else x;
+    val vars =
+      if null frees then ""
+      else "variables: " ^ commas (map (fn (x, T) => name x ^ " :: " ^ print_typ ctxt T) frees);
+    val facts = Pretty.pure_string_of (Pretty.chunks (Proof_Context.pretty_local_facts true ctxt));
+  in space_implode "\n" (filter (fn s => s <> "") [vars, facts]) end;
+
+(*plain strings: the handle to start from (or ""), and a goal of the agent's own*)
+fun context_of state [from, goal] =
+      let
+        val (st0, root) =
+          if from = "" then (state, state)
+          else
+            (case lookup_handle from of
+              SOME {state, root} => (state, root)
+            | NONE =>
+                error ("There is no handle " ^ from ^
+                  " (any more): handles last until 256 newer ones are made, or the prover " ^
+                  "restarts. Start again from a line."));
+        val st =
+          open_goal st0 goal
+            handle CANDIDATE msg => error ("The goal could not be stated: " ^ msg);
+        val ctxt = Toplevel.context_of st;
+        val subgoals =
+          (case try (#goal o Proof.goal o Toplevel.proof_of) st of
+            SOME goal => Thm.prems_of goal
+          | NONE => []);
+        val statement =
+          if from = "" then ""
+          else
+            (case closed_statements root st of
+              ([("statement", s)] :: _, _) => s
+            | _ => "");
+      in
+        [("goal", if Toplevel.is_proof st then pretty_state st else ""),
+         ("definitions", bounded (definitions ctxt subgoals)),
+         ("facts", bounded (local_facts ctxt subgoals)),
+         ("statement", statement)]
+      end
+  | context_of _ _ = error "Bad arguments";
+
+(*the facts that Sledgehammer's relevance filter MePo ranks highest for the first subgoal, as
+  pairs of name and statement; arguments: a goal of the agent's own (or ""), and how many*)
+val relevant_operation = "\
+\Command.no_print_function \"vscode_agent_relevant_query\";\n\
+\Query_Operation.register {name = \"vscode_agent_relevant\", pri = Task_Queue.urgent_pri}\n\
+\  (fn {state = st, args, output_result, ...} =>\n\
+\    let\n\
+\      val (goal, limit) =\n\
+\        (case args of\n\
+\          [g, l] => (g, the_default 20 (Int.fromString l))\n\
+\        | _ => error \"Bad arguments\");\n\
+\      val st' =\n\
+\        if goal = \"\" then st\n\
+\        else\n\
+\          let\n\
+\            val thy = Toplevel.theory_of st;\n\
+\            val text =\n\
+\              (if not (Toplevel.is_proof st) then \"lemma \"\n\
+\               else if can (Proof.assert_backward o Toplevel.proof_of) st then \"proof - have \"\n\
+\               else \"have \") ^ goal;\n\
+\          in\n\
+\            fold Toplevel.command_exception\n\
+\              (Outer_Syntax.parse_text thy (K {skip_theory = false, theory = thy}) Position.none text) st\n\
+\          end;\n\
+\      val prf =\n\
+\        (case try Toplevel.proof_of st' of\n\
+\          SOME prf => prf\n\
+\        | NONE => error \"There is no goal here\");\n\
+\      val {context = ctxt, facts = chained, goal = goal_thm} = Proof.goal prf;\n\
+\      val _ = if Thm.nprems_of goal_thm = 0 then error \"There is no goal left here\" else ();\n\
+\      val (_, hyps, concl) = ATP_Util.strip_subgoal goal_thm 1 ctxt;\n\
+\      val facts =\n\
+\        Sledgehammer_Fact.nearly_all_facts_of_context ctxt false\n\
+\          Sledgehammer_Fact.no_fact_override chained hyps concl;\n\
+\      val params = Sledgehammer_Commands.default_params (Proof_Context.theory_of ctxt) [];\n\
+\      val found = Sledgehammer_MePo.mepo_suggested_facts ctxt params limit NONE hyps concl facts;\n\
+\      fun statement th = Pretty.pure_string_of (Syntax.pretty_term ctxt (Thm.prop_of th));\n\
+\    in\n\
+\      output_result [YXML.string_of_body\n\
+\        (XML.Encode.list (XML.Encode.pair XML.Encode.string XML.Encode.string)\n\
+\          (map (fn ((name, _), th) => (name, statement th)) found))]\n\
+\    end);\n";
 
 in
 
@@ -419,5 +789,22 @@ val _ =
   Query_Operation.register {name = "vscode_agent_try", pri = Task_Queue.urgent_pri}
     (fn {state, args, output_result, ...} =>
       output_result [encode_result (try_all state (decode_args args))]);
+
+val _ =
+  Query_Operation.register {name = "vscode_agent_context", pri = Task_Queue.urgent_pri}
+    (fn {state, args, output_result, ...} =>
+      output_result [YXML.string_of_body (XML.Encode.properties (context_of state args))]);
+
+(*replaced below in a logic that contains Sledgehammer*)
+val _ =
+  Query_Operation.register {name = "vscode_agent_relevant", pri = Task_Queue.urgent_pri}
+    (fn _ => error "Relevant facts need a session that contains Sledgehammer, like HOL");
+
+val _ =
+  (case Build.lookup_theory "HOL.Sledgehammer" of
+    SOME thy =>
+      ML_Context.eval_source_in (SOME (Proof_Context.init_global thy)) ML_Compiler.flags
+        (Input.string relevant_operation)
+  | NONE => ());
 
 end;
