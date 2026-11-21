@@ -192,7 +192,7 @@ object LSP {
         "documentRangeFormattingProvider" -> true,
         /*the PIDE/agent_* requests: a server that does not know a request never answers it;
           the PIDE/sledgehammer_job_* messages*/
-        "experimental" -> JSON.Object("isabelleAgent" -> 1, "isabelleSledgehammerJobs" -> 1))
+        "experimental" -> JSON.Object("isabelleAgent" -> 2, "isabelleSledgehammerJobs" -> 1))
   }
 
   object Initialized extends Notification0("initialized")
@@ -589,10 +589,21 @@ object LSP {
       }
   }
 
+  object Agent_Profile {
+    def unapply(json: JSON.T): Option[(Id, JFile)] =
+      json match {
+        case RequestMessage(id, "PIDE/agent_profile", Some(params)) =>
+          for (uri <- JSON.string(params, "uri") if Url.is_wellformed_file(uri))
+            yield (id, Url.absolute_file(uri))
+        case _ => None
+      }
+  }
+
   object Agent_State extends RequestTextDocumentPosition("PIDE/agent_state")
 
   sealed case class Agent_Try_Params(
     node_pos: Line.Node_Position,
+    from: String,
     goal: String,
     candidates: List[String],
     timeout_ms: Int,
@@ -611,6 +622,7 @@ object LSP {
             candidates <- JSON.strings(params, "candidates")
           } yield {
             (id, Agent_Try_Params(node_pos,
+              JSON.string(params, "from").getOrElse(""),
               JSON.string(params, "goal").getOrElse(""),
               candidates,
               JSON.int(params, "timeout_ms").getOrElse(10000),
@@ -618,6 +630,31 @@ object LSP {
               JSON.strings(params, "watch_rules").getOrElse(Nil),
               JSON.strings(params, "watch_patterns").getOrElse(Nil),
               JSON.int(params, "watch_limit").getOrElse(20),
+              JSON.int(params, "deadline_ms").getOrElse(120000)))
+          }
+        case _ => None
+      }
+  }
+
+  sealed case class Agent_Context_Params(
+    node_pos: Line.Node_Position,
+    from: String,
+    goal: String,
+    relevant: Boolean,
+    limit: Int,
+    deadline_ms: Int)
+
+  object Agent_Context {
+    def unapply(json: JSON.T): Option[(Id, Agent_Context_Params)] =
+      json match {
+        case RequestMessage(id, "PIDE/agent_context", Some(params)) =>
+          for (node_pos <- TextDocumentPosition.unapply(params))
+          yield {
+            (id, Agent_Context_Params(node_pos,
+              JSON.string(params, "from").getOrElse(""),
+              JSON.string(params, "goal").getOrElse(""),
+              JSON.bool(params, "relevant").getOrElse(true),
+              JSON.int(params, "limit").getOrElse(20),
               JSON.int(params, "deadline_ms").getOrElse(120000)))
           }
         case _ => None

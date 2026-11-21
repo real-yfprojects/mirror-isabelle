@@ -18,6 +18,8 @@ import scala.annotation.tailrec
 
 object VSCode_Agent {
   val try_function = "vscode_agent_try_query"
+  val context_function = "vscode_agent_context_query"
+  val relevant_function = "vscode_agent_relevant_query"
 
   /*what run_query says when the command went while the prover worked: worth trying again*/
   val changed_message = "The theory changed at this position while the prover worked; try again"
@@ -199,6 +201,17 @@ class VSCode_Agent(server: Language_Server) {
 
         def count(name: String): Int = node.commands.iterator.count(_.span.name == name)
 
+        /*where the proof is skipped, with the goals each sorry skips: what is left to prove*/
+        val skipped =
+          node.commands.iterator.filter(command =>
+            command.span.name == "sorry" || command.span.name == "oops").take(20).map({ command =>
+              val ask = asks > 0
+              if (ask) asks -= 1
+              place(model, snapshot, command) ++
+                JSON.optional("goal" ->
+                  Some(goals_before(model, snapshot, keywords, command, ask)).filter(_.nonEmpty))
+            }).toList
+
         /*where the prover is while the theory is not done: the commands it is running -- the
           slow one among them, if it hangs -- and those it has not started, counted without
           the blanks and comments that Node_Status counts with them*/
@@ -227,8 +240,63 @@ class VSCode_Agent(server: Language_Server) {
           "running" -> running.take(5).map(place(model, snapshot, _)),
           "sorry" -> count("sorry"),
           "oops" -> count("oops"),
+          "skipped" -> skipped,
           "messages" -> messages) ++
         JSON.optional("first_waiting" -> waiting.headOption.map(place(model, snapshot, _)))
+    }
+
+
+  /* profile: the time of each command, and the lemma or other theory command it belongs to */
+
+  private def group_name(command: Command, kind: String, line: Int): String = {
+    val name =
+      command.span.content.dropWhile(tok => !tok.is_command).drop(1).find(_.is_proper)
+        .filter(tok => tok.is_ident || tok.kind == Token.Kind.LONG_IDENT).map(_.content)
+    if (Keyword.theory_goal(kind)) name.getOrElse("unnamed " + command.span.name + " at line " + (line + 1))
+    else command.span.name + name.map(" " + _).getOrElse(" at line " + (line + 1))
+  }
+
+  def profile(file: JFile): JSON.Object.T =
+    resources.get_rendering(file) match {
+      case None => JSON.Object("error" -> "The theory is not loaded")
+      case Some(rendering) =>
+        val model = rendering.model
+        val snapshot = rendering.snapshot
+        val keywords = model.syntax().keywords
+        val now = Date.now()
+        val st =
+          Document_Status.Node_Status.make(now, snapshot.state, snapshot.version, model.node_name)
+
+        /*a command outside proofs starts a group; a proof command belongs to the last one*/
+        var group = ("", 0)
+        val commands =
+          (for (command <- snapshot.node.commands.iterator if command.is_proper) yield {
+            val kind = keywords.kinds.getOrElse(command.span.name, "")
+            val line = line_of(model, snapshot, command)
+            val proof = Keyword.proof(kind)
+            if (!proof && !Keyword.diag(kind) && !Keyword.document(kind)) {
+              group = (group_name(command, kind, line), line)
+            }
+            val seconds =
+              snapshot.state.command_status(snapshot.version, command).timings.sum(now).seconds
+            (command, kind, line, proof, group, seconds)
+          }).map({ case (command, kind, line, proof, (name, at), seconds) =>
+            JSON.Object(
+              "line" -> line,
+              "command" -> command.span.name,
+              "source" -> first_line(command),
+              "proof" -> proof,
+              "seconds" -> seconds,
+              "group" -> name,
+              "group_line" -> at)
+          }).toList
+
+        JSON.Object(
+          "outdated" -> snapshot.is_outdated,
+          "percentage" -> st.percentage,
+          "consolidated" -> st.consolidated,
+          "running_commands" -> st.running,
+          "commands" -> commands)
     }
 
 
@@ -430,8 +498,12 @@ class VSCode_Agent(server: Language_Server) {
   private def json_props(props: Properties.T): JSON.Object.T =
     JSON.Object(props.map({ case (a, b) => a -> ascii(b) }): _*)
 
+  /*with a handle to start from (from), the candidates run on its state, and the position
+    only names the command the query runs at; the one before it, as with a goal, is more
+    likely to be checked already*/
   def try_candidates(
     node_pos: Line.Node_Position,
+    from: String,
     goal: String,
     candidates: List[String],
     timeout_ms: Int,
@@ -444,9 +516,9 @@ class VSCode_Agent(server: Language_Server) {
     /*plain strings: overlay arguments travel as YXML themselves*/
     def counted(xs: List[String]): List[String] = xs.length.toString :: xs
     val args =
-      List(goal, timeout_ms.toString, if (stats) "true" else "", watch_limit.toString) :::
+      List(from, goal, timeout_ms.toString, if (stats) "true" else "", watch_limit.toString) :::
         counted(candidates) ::: counted(watch_rules) ::: counted(watch_patterns)
-    run_query(node_pos, goal.nonEmpty, try_function, args, deadline) match {
+    run_query(node_pos, goal.nonEmpty || from.nonEmpty, try_function, args, deadline) match {
       case Left(msg) => JSON.Object("error" -> msg)
       case Right(Result(_, Some(error), _)) => JSON.Object("error" -> error)
       case Right(Result(body, None, _)) =>
@@ -455,17 +527,73 @@ class VSCode_Agent(server: Language_Server) {
           val (header, cands) =
             pair(properties,
               list(pair(properties, pair(list(pair(string, pair(int, int))),
-                pair(list(string), list(properties))))))(body)
+                pair(list(string), pair(list(properties),
+                  pair(list(properties), pair(list(properties), list(properties)))))))))(body)
           json_props(header) +
-            ("candidates" -> cands.map({ case (props, (stats, (cycle, steps))) =>
+            ("candidates" -> cands.map(
+              { case (props, (stats, (cycle, (steps, (holes, (slow, statements)))))) =>
               json_props(props) ++
               JSON.Object(
                 "stats" -> stats.map({ case (rule, (applied, failed)) =>
                   JSON.Object("rule" -> ascii(rule), "applied" -> applied,
                     "condition_failed" -> failed) }),
                 "cycle" -> cycle.map(ascii),
-                "steps" -> steps.map(json_props))
+                "steps" -> steps.map(json_props),
+                "holes" -> holes.map(json_props),
+                "slow_steps" -> slow.map(json_props),
+                "statements" -> statements.map(json_props))
             }))
+        }
+        catch { case _: XML.Error => JSON.Object("error" -> "Bad answer from the prover") }
+    }
+  }
+
+
+  /* context: the definitions and facts at a goal, and the facts relevant to it */
+
+  def context(
+    node_pos: Line.Node_Position,
+    from: String,
+    goal: String,
+    relevant: Boolean,
+    limit: Int,
+    deadline: Time
+  ): JSON.Object.T = {
+    def relevant_facts(goal: String): JSON.Object.T =
+      run_query(node_pos, goal.nonEmpty, relevant_function, List(goal, limit.toString), deadline)
+      match {
+        case Left(msg) => JSON.Object("relevant_error" -> msg)
+        case Right(res) if res.error.isDefined => JSON.Object("relevant_error" -> res.error.get)
+        case Right(res) =>
+          try {
+            import XML.Decode._
+            JSON.Object("relevant" -> list(pair(string, string))(res.body).map(
+              { case (name, statement) =>
+                  JSON.Object("name" -> ascii(name), "statement" -> ascii(statement)) }))
+          }
+          catch { case _: XML.Error => JSON.Object("relevant_error" -> "Bad answer from the prover") }
+      }
+
+    run_query(node_pos, goal.nonEmpty || from.nonEmpty, context_function, List(from, goal), deadline)
+    match {
+      case Left(msg) => JSON.Object("error" -> msg)
+      case Right(res) if res.error.isDefined => JSON.Object("error" -> res.error.get)
+      case Right(res) =>
+        try {
+          val props = XML.Decode.properties(res.body)
+          val result = json_props(props)
+          if (!relevant) result
+          else if (from.isEmpty) result ++ relevant_facts(goal)
+          else {
+            /*the relevance filter is compiled in HOL, apart from the handles: it looks at the
+              handle's first goal stated at the line its chain started at*/
+            Properties.get(props, "statement").filter(_.nonEmpty) match {
+              case Some(statement) =>
+                result ++ relevant_facts("\\<open>" + ascii(statement) + "\\<close>")
+              case None =>
+                result + ("relevant_error" -> "The goal of this handle cannot be stated on its own")
+            }
+          }
         }
         catch { case _: XML.Error => JSON.Object("error" -> "Bad answer from the prover") }
     }
