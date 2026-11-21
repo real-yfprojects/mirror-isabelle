@@ -974,12 +974,18 @@ class Language_Server(
           case LSP.Dependents_Request(id, node_pos, files) => dependents(id, node_pos, files)
           case LSP.Check_Theories(id, files) => check_theories(id, files)
           case LSP.Agent_Report(id, file) => agent_reply(id, "agent_report")(agent.report(file))
+          case LSP.Agent_Profile(id, file) => agent_reply(id, "agent_profile")(agent.profile(file))
           case LSP.Agent_State(id, node_pos) =>
             agent_reply(id, "agent_state")(agent.state(node_pos))
           case LSP.Agent_Try(id, p) =>
             agent_reply(id, "agent_try") {
-              agent.try_candidates(p.node_pos, p.goal, p.candidates, p.timeout_ms, p.stats,
+              agent.try_candidates(p.node_pos, p.from, p.goal, p.candidates, p.timeout_ms, p.stats,
                 p.watch_rules, p.watch_patterns, p.watch_limit,
+                Time.now() + Time.ms(p.deadline_ms))
+            }
+          case LSP.Agent_Context(id, p) =>
+            agent_reply(id, "agent_context") {
+              agent.context(p.node_pos, p.from, p.goal, p.relevant, p.limit,
                 Time.now() + Time.ms(p.deadline_ms))
             }
           case LSP.Agent_Sledgehammer(id, node_pos, goal, timeout_s, deadline_ms) =>
