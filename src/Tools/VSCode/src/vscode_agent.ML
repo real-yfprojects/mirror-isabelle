@@ -277,10 +277,11 @@ fun step_source syms offsets i =
 
 type run =
   {state: Toplevel.state, names: string list,
-   holes: Properties.T list, steps: (Properties.T * Time.time) list};
+   holes: (Properties.T * Toplevel.state) list, steps: (Properties.T * Time.time) list};
 
 (*the state after the text, the names of its commands, the holes that its sorrys leave
-  (their line in the text and the goals they skip), and the time of each step*)
+  (their line in the text, the goals they skip, the text before them, and the state at
+  them), and the time of each step*)
 fun run_text st text : run =
   let
     val thy = Toplevel.theory_of st;
@@ -302,7 +303,10 @@ fun run_text st text : run =
       let
         val holes' =
           if is_sorry (Toplevel.name_of tr)
-          then [("line", line_of tr), ("goals", pretty_state st)] :: holes
+          then
+            ([("line", line_of tr), ("goals", pretty_state st),
+              ("prefix", Symbol.trim_blanks (implode (take (nth offsets i - 1) syms)))], st)
+            :: holes
           else holes;
         val start = Timing.start ();
         val st' =
@@ -570,13 +574,27 @@ fun encode_result (header, candidates) =
         (header, candidates))
   end;
 
-(*how a proof goes on from a state: by "apply" in prove mode, by "show" in an Isar proof body*)
+(*how a proof goes on from a state: by "apply" in prove mode, by "show" in an Isar proof body;
+  at the theory level, after a closed proof, only by stating more*)
 fun mode st =
-  if can (Proof.assert_backward o Toplevel.proof_of) st then "prove" else "state";
+  if not (Toplevel.is_proof st) then "theory"
+  else if can (Proof.assert_backward o Toplevel.proof_of) st then "prove" else "state";
+
+(*a hole of an outline as a handle: the state at its sorry, where a proof for it is tried in
+  place of the sorry, with its goals stated again at the root (numbered: statement_1, ...)*)
+fun hole_handle root (props, st) =
+  let
+    val id = store_handle {state = st, root = root};
+    val (statements, using) = the_default ([], "") (try (closed_statements root) st);
+    val numbered =
+      flat (map_index (fn (i, p) => map (fn (k, s) => (k ^ "_" ^ string_of_int (i + 1), s)) p)
+        statements);
+  in props @ [("handle", id), ("using", using), ("mode", mode st)] @ numbered end;
 
 (*a candidate's result with the handle of the state it reached, and for goals left there each
   stated again at the root*)
-fun with_handle root ((props, (stats, (cycle, (steps, (holes, slow))))), reached) =
+fun with_handle root ((props, (stats, (cycle, (steps, (holes0, slow))))), reached) =
+  let val holes = map (hole_handle root) holes0 in
   (case reached of
     NONE => (props, (stats, (cycle, (steps, (holes, (slow, []))))))
   | SOME st =>
@@ -589,7 +607,8 @@ fun with_handle root ((props, (stats, (cycle, (steps, (holes, slow))))), reached
       in
         (props @ [("handle", id), ("using", using), ("mode", mode st)],
           (stats, (cycle, (steps, (holes, (slow, statements))))))
-      end);
+      end)
+  end;
 
 fun try_all state {from, goal, timeout, stats, watch, candidates} =
   let
@@ -618,7 +637,8 @@ fun try_all state {from, goal, timeout, stats, watch, candidates} =
               val header =
                 [("state", if Toplevel.is_proof st_goal then pretty_state st_goal else ""),
                  ("proof", if Toplevel.is_proof st0 then "true" else ""),
-                 ("goal_handle", goal_handle), ("goal_keyword", goal_keyword st0)];
+                 ("goal_handle", goal_handle), ("goal_keyword", goal_keyword st0),
+                 ("from_mode", if from = "" then "" else mode st0)];
             in (header, map (with_handle root) results) end
         | Exn.Exn (CANDIDATE msg) => ([("error", "The goal could not be stated: " ^ msg)], [])
         | Exn.Exn exn =>
@@ -639,9 +659,11 @@ fun bounded s =
 fun print_typ ctxt T = Pretty.pure_string_of (Syntax.pretty_typ ctxt T);
 
 (*the fact a specification's rules go by, if there is one by that name: its name for a
-  definition, NAME.simps for a fun or primrec, NAME.intros for an inductive predicate*)
-fun spec_fact_name ctxt ({name, rough_classification, ...}: Spec_Rules.spec_rule) =
+  definition, NAME.simps for a fun or primrec, NAME.intros for an inductive predicate. A fun's
+  rules come without a name (the function package registers none): then by the constant's*)
+fun spec_fact_name ctxt c ({name, rough_classification, ...}: Spec_Rules.spec_rule) =
   let
+    val name = if name = "" then c else name;
     val short =
       (case Long_Name.explode name of
         _ :: (rest as _ :: _) => Long_Name.implode rest
@@ -675,20 +697,20 @@ fun definitions ctxt ts =
       (case filter (of_type T) (Spec_Rules.retrieve ctxt (Const (c, T))) of
         [] => NONE
       | specs => SOME (c, T, specs));
-    fun spec_text (spec: Spec_Rules.spec_rule) =
+    fun spec_text c (spec: Spec_Rules.spec_rule) =
       let
         val rules = #rules spec;
         val shown = map (print_term ctxt o Thm.prop_of) (take max_rules rules);
         val more = length rules - max_rules;
       in
-        (case spec_fact_name ctxt spec of
+        (case spec_fact_name ctxt c spec of
           SOME n => "  by " ^ n ^ ":\n"
         | NONE => "") ^
         cat_lines (map (prefix "    ") (maps split_lines shown)) ^
         (if more > 0 then "\n    ... and " ^ string_of_int more ^ " more" else "")
       end;
     fun text (c, T, specs) =
-      Long_Name.base_name c ^ " :: " ^ print_typ ctxt T ^ "\n" ^ cat_lines (map spec_text specs);
+      Long_Name.base_name c ^ " :: " ^ print_typ ctxt T ^ "\n" ^ cat_lines (map (spec_text c) specs);
   in
     map_filter entry (own @ other) |> take max_consts |> map text |> space_implode "\n\n"
   end;
