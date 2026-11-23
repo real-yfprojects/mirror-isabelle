@@ -518,10 +518,19 @@ fun closed_statements root st =
       let
         val ctxt0 = Toplevel.context_of root;
         val ctxt = Toplevel.context_of st;
-        val prems = new_premises ctxt0 ctxt;
+        (*a fact with schematic variables -- the hypothesis of an induction on a goal under
+          \<And> -- is a premise for all their values; the case has it as an assumption too,
+          which comes first*)
+        fun close_vars t =
+          fold (fn (xi as (x, _), T) => fn p => Logic.all_const T $ Term.lambda_name (x, Var (xi, T)) p)
+            (Term.add_vars t []) t;
+        val pairs =
+          map (fn t => (t, close_vars t)) (new_premises ctxt0 ctxt)
+          |> distinct (fn ((_, a), (_, b)) => a aconv b);
+        val prems = map #1 pairs;
         fun close t =
           let
-            val prop = Logic.list_implies (prems, t);
+            val prop = Logic.list_implies (map #2 pairs, t);
             val frees = rev (filter_out (Variable.is_fixed ctxt0 o #1) (Term.add_frees prop []));
             val prop' =
               fold_rev (fn (x, T) => fn p =>
@@ -532,10 +541,24 @@ fun closed_statements root st =
               SOME s => [("statement", s)]
             | NONE => [("error", "it does not print so that it reads back the same")])
           end;
-        val literals = map (reparsable {general = false} ctxt) prems;
+        (*each fact as a literal; one with schematic variables, which no literal is, by its name*)
+        val named = Facts.dest_static false [Proof_Context.facts_of ctxt0] (Proof_Context.facts_of ctxt);
+        fun by_name t =
+          get_first (fn (a, ths) =>
+            (case find_index (fn th => Thm.prop_of th aconv t) ths of
+              ~1 => NONE
+            | i =>
+                SOME (#2 (Proof_Context.markup_extern_fact ctxt a) ^
+                  (if length ths = 1 then "" else "(" ^ string_of_int (i + 1) ^ ")")))) named;
+        fun literal t =
+          Option.map (fn s => "\092<open>" ^ s ^ "\092<close>") (reparsable {general = false} ctxt t);
+        fun fact_ref t =
+          if Term.exists_subterm is_Var t then (case by_name t of NONE => literal t | some => some)
+          else (case literal t of NONE => by_name t | some => some);
+        val refs = map fact_ref prems;
         val using =
-          if null prems orelse exists is_none literals then ""
-          else "using " ^ space_implode " " (map (fn s => "\092<open>" ^ the s ^ "\092<close>") literals);
+          if null prems orelse exists is_none refs then ""
+          else "using " ^ space_implode " " (map the refs);
       in (map close (take max_statements (Thm.prems_of goal)), using) end);
 
 
@@ -725,7 +748,17 @@ fun local_facts ctxt ts =
     val vars =
       if null frees then ""
       else "variables: " ^ commas (map (fn (x, T) => name x ^ " :: " ^ print_typ ctxt T) frees);
-    val facts = Pretty.pure_string_of (Pretty.chunks (Proof_Context.pretty_local_facts true ctxt));
+    (*the named ones that hold something: not the unnamed facts (this, again), nor an empty
+      prems of a case*)
+    val named =
+      Facts.dest_static false [Global_Theory.facts_of (Proof_Context.theory_of ctxt)]
+        (Proof_Context.facts_of ctxt)
+      |> filter_out (null o #2);
+    val facts =
+      if null named then ""
+      else
+        Pretty.pure_string_of
+          (Pretty.big_list "local facts:" (map (Proof_Context.pretty_fact ctxt) named));
   in space_implode "\n" (filter (fn s => s <> "") [vars, facts]) end;
 
 (*plain strings: the handle to start from (or ""), and a goal of the agent's own*)
